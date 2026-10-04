@@ -16,6 +16,7 @@ let settings = {
   serverUrl: DEFAULT_SERVER,
   model: '',
   autoApprove: false,
+  includeTab: true,
   projectRoot: '',
   sessionId: null,
 };
@@ -37,6 +38,7 @@ async function loadSettings() {
   $('serverUrl').value = settings.serverUrl || DEFAULT_SERVER;
   $('modelSelect').value = settings.model || '';
   $('autoApprove').checked = !!settings.autoApprove;
+  $('includeTab').checked = settings.includeTab !== false;
   $('projectRoot').value = settings.projectRoot || '';
   if (transcript.length) renderTranscript();
 }
@@ -157,19 +159,37 @@ function appendAssistant(text, interim) {
   scrollToBottom();
 }
 
+function isPlanningStatus(message) {
+  const text = String(message || '');
+  return /\b(planning|thinking|reasoning|thoughts?)\b/i.test(text);
+}
+
 function appendThinking(text) {
   if (!lastBlock || lastBlock.type !== 'thinking') {
     const el = appendEl('msg thinking');
     const header = document.createElement('div');
     header.className = 'thinking-header';
-    header.textContent = '💭 Thinking';
+    const chevron = document.createElement('span');
+    chevron.className = 'thinking-chevron';
+    chevron.textContent = '▾';
+    const label = document.createElement('span');
+    label.textContent = '💭 Thinking';
+    header.append(chevron, label);
     const body = document.createElement('div');
     body.className = 'thinking-body';
     el.append(header, body);
     header.addEventListener('click', () => el.classList.toggle('collapsed'));
     lastBlock = { type: 'thinking', el, bodyEl: body };
   }
+
+  // Keep the reasoning box visible while a plan/thinking stream is active, even
+  // if the user collapsed it earlier. New reasoning should re-expand it.
+  if (lastBlock.el.classList.contains('collapsed')) {
+    lastBlock.el.classList.remove('collapsed');
+  }
+
   lastBlock.bodyEl.textContent += text;
+  lastBlock.bodyEl.scrollTop = lastBlock.bodyEl.scrollHeight;
   scrollToBottom();
 }
 
@@ -227,7 +247,7 @@ function hideApproval() {
   delete $('approval').dataset.id;
 }
 
-async function respondApproval(allowed) {
+async function respondApproval(allowed, scope) {
   const id = $('approval').dataset.id;
   if (!id) return;
   hideApproval();
@@ -235,7 +255,7 @@ async function respondApproval(allowed) {
     await fetch(`${settings.serverUrl || DEFAULT_SERVER}/approve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, allowed }),
+      body: JSON.stringify({ id, allowed, scope }),
     });
   } catch (e) {
     // The server may have gone away; nothing useful to do here.
@@ -598,9 +618,15 @@ function handleEvent(event, data) {
         saveSettings();
       }
       break;
-    case 'status':
-      appendStatus(payload.message || '…');
+    case 'status': {
+      const message = payload.message || '…';
+      if (isPlanningStatus(message)) {
+        appendThinking(message);
+        break;
+      }
+      appendStatus(message);
       break;
+    }
     case 'thinking':
       appendThinking(payload.content || '');
       break;
@@ -672,6 +698,19 @@ async function readStream(body) {
 }
 
 // ---------------- sending ----------------
+// Capture the active tab's content and frame it as context for the model.
+function buildTabContext(snap) {
+  const s = snap || {};
+  return [
+    '[Active browser tab — captured by the extension]',
+    'URL: ' + (s.url || ''),
+    'Title: ' + (s.title || ''),
+    '---',
+    s.text || '',
+    '[/Active browser tab]',
+  ].join('\n');
+}
+
 async function sendMessage() {
   const text = inputEl.value.trim();
   if (!text || streaming) return;
@@ -684,9 +723,22 @@ async function sendMessage() {
   const ac = new AbortController();
   activeController = ac;
 
+  // Optionally read the active browser tab and attach it as context so the
+  // agent can plan and act on the page step by step (like Claude).
+  let outMessage = text;
+  if (settings.includeTab !== false) {
+    appendStatus('🌐 Reading active tab…');
+    try {
+      const snap = await executeBrowserTool('get_page', { max_chars: 8000, max_scrolls: 2 });
+      outMessage = buildTabContext(snap) + '\n\n' + text;
+    } catch (e) {
+      appendStatus('⚠ Could not read active tab: ' + ((e && e.message) || e));
+    }
+  }
+
   const body = {
     sessionId: settings.sessionId,
-    message: text,
+    message: outMessage,
     model: settings.model || undefined,
     autoApprove: settings.autoApprove,
   };
@@ -819,6 +871,26 @@ async function applyProject(root) {
   }
 }
 
+async function refreshActiveTabProfile() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const titleEl = $('tabTitle');
+    const urlEl = $('tabUrl');
+    if (!tab) {
+      titleEl.textContent = 'No active tab';
+      urlEl.textContent = 'Open a page to enable context';
+      return;
+    }
+    const title = (tab.title || 'Untitled page').trim() || 'Untitled page';
+    const url = (tab.url || 'chrome://newtab').trim() || 'chrome://newtab';
+    titleEl.textContent = title;
+    urlEl.textContent = url;
+  } catch (e) {
+    $('tabTitle').textContent = 'Active tab unavailable';
+    $('tabUrl').textContent = 'Tab metadata could not be loaded';
+  }
+}
+
 function clearHistory() {
   settings.sessionId = null;
   transcript = [];
@@ -844,6 +916,13 @@ function autoGrow() {
 
 // ---------------- wiring ----------------
 function init() {
+  refreshActiveTabProfile();
+  if (chrome.tabs && chrome.tabs.onActivated) {
+    chrome.tabs.onActivated.addListener(refreshActiveTabProfile);
+    chrome.tabs.onUpdated.addListener(() => refreshActiveTabProfile());
+    chrome.windows.onFocusChanged.addListener(() => refreshActiveTabProfile());
+  }
+
   $('send').addEventListener('click', sendMessage);
   inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -876,9 +955,15 @@ function init() {
     settings.autoApprove = e.target.checked;
     saveSettings();
   });
+  $('includeTab').addEventListener('change', (e) => {
+    settings.includeTab = e.target.checked;
+    saveSettings();
+  });
   $('refreshModels').addEventListener('click', loadModels);
-  $('approveBtn').addEventListener('click', () => respondApproval(true));
-  $('denyBtn').addEventListener('click', () => respondApproval(false));
+  $('approveBtn').addEventListener('click', () => respondApproval(true, 'once'));
+  $('sessionBtn').addEventListener('click', () => respondApproval(true, 'session'));
+  $('alwaysBtn').addEventListener('click', () => respondApproval(true, 'always'));
+  $('denyBtn').addEventListener('click', () => respondApproval(false, 'once'));
 
   loadSettings().then(() => {
     if (settings.projectRoot) applyProject(settings.projectRoot);

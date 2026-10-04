@@ -4,7 +4,7 @@
  *
  * Implements the Model Context Protocol (stdio transport, JSON-RPC 2.0) and
  * exposes three research tools:
- *   - web_search(query)  → DuckDuckGo top results
+ *   - web_search(query)  → Google top results
  *   - fetch_page(url)    → readable text of a web page
  *   - wikipedia(query)   → Wikipedia summary of the top article
  *
@@ -58,7 +58,7 @@ const TOOLS = [
   {
     name: 'web_search',
     description:
-      'Search the web (DuckDuckGo, free, no API key) and return the top results with titles, URLs, and snippets.',
+      'Search the web on Google and return the top related results with titles and URLs.',
     inputSchema: {
       type: 'object',
       properties: { query: { type: 'string', description: 'The search query.' } },

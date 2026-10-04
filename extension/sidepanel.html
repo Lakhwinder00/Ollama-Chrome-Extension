@@ -37,6 +37,10 @@
       <input id="autoApprove" type="checkbox" />
       <span>Auto-approve write &amp; run (unsafe)</span>
     </label>
+    <label class="field checkbox">
+      <input id="includeTab" type="checkbox" checked />
+      <span>Read active tab into context</span>
+    </label>
   </section>
 
   <section class="project-bar">
@@ -49,6 +53,19 @@
     </label>
   </section>
 
+  <section id="tabProfile" class="tab-profile" aria-live="polite">
+    <div class="tab-profile-header">
+      <span class="tab-badge">Active tab</span>
+    </div>
+    <div class="tab-profile-body">
+      <div class="tab-icon">◉</div>
+      <div class="tab-info">
+        <div id="tabTitle" class="tab-title">Loading…</div>
+        <div id="tabUrl" class="tab-url">Waiting for browser tab</div>
+      </div>
+    </div>
+  </section>
+
   <main id="messages" class="messages"></main>
 
   <section id="approval" class="approval hidden">
@@ -57,7 +74,9 @@
       <pre id="approvalArgs"></pre>
     </div>
     <div class="approval-actions">
-      <button id="approveBtn" class="btn approve">Approve</button>
+      <button id="approveBtn" class="btn approve" title="Allow this single call">Once</button>
+      <button id="sessionBtn" class="btn approve-session" title="Allow for this session">Session</button>
+      <button id="alwaysBtn" class="btn approve-always" title="Always allow (saved)">Always</button>
       <button id="denyBtn" class="btn deny">Deny</button>
     </div>
   </section>

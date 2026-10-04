@@ -28,13 +28,17 @@ User → Ollama ("I need to read login.js")
      → Ollama → final answer
 ```
 
-**Tools:** `read_file`, `write_file`, `search_files`, `run_command`, `web_search`, `fetch_url` (project/web) +
+**Tools:** `read_file`, `write_file`, `edit_file`, `delete_file`, `list_directory`, `search_files`,
+`run_command`, `git_status`, `git_diff`, `git_log`, `git_branch`, `git_checkout`, `git_commit`,
+`web_search`, `fetch_url` (project/web) +
 `get_page`, `get_dom`, `click`, `type`, `scroll`, `navigate`, `search`, `screenshot` (browser).
 
 **Safety built in:**
 - The agent can only touch files **inside the project root you choose** — every path is
   resolved and checked before it touches disk.
-- `write_file` and `run_command` pause and ask for **Approve / Deny** in the popup.
+- Dangerous operations (`write_file`, `edit_file`, `delete_file`, `run_command`, `git_commit`,
+  `git_checkout`) pause and ask for approval first.
+- Approvals have **scopes**: *Once*, *Session*, or *Always* (persisted in `~/.myagent/permissions.json`).
 - The server binds to `127.0.0.1` only.
 
 ## Requirements
@@ -74,6 +78,11 @@ Pick a model from the dropdown, then just ask it to fix a bug.
 > control). After reloading, accept that permission, or browser tools will fail
 > with "manifest must request permission to access the host".
 
+> **Active-tab context:** the side panel has a "Read active tab into context"
+> toggle (on by default). When enabled, it captures the active tab's URL, title,
+> and text and attaches it to each message so the agent can plan and act on the
+> page step by step, like Claude.
+
 ## Server API
 
 | Endpoint      | Method | Body                                   | Returns                       |
@@ -83,7 +92,7 @@ Pick a model from the dropdown, then just ask it to fix a bug.
 | `/project`    | GET    | —                                      | Current project root          |
 | `/project`    | POST   | `{ "root": "C:\\path" }`               | Set project root              |
 | `/chat`       | POST   | `{ sessionId?, message, model?, autoApprove? }` | Server-Sent Events stream |
-| `/approve`    | POST   | `{ "id": "…", "allowed": true }`       | Resolve a pending approval    |
+| `/approve`    | POST   | `{ "id": "…", "allowed": true, "scope": "once|session|always" }` | Resolve a pending approval |
 | `/browser/result` | POST | `{ "id": "…", "result" or "error" }` | Return a browser-tool result  |
 
 `/chat` streams these SSE events: `start`, `status`, `assistant`, `tool`,
@@ -101,7 +110,7 @@ Invoke-WebRequest -Uri http://127.0.0.1:8787/chat -Method Post -ContentType 'app
 `mcp/server.js` is a standalone **Model Context Protocol** server — 100% free, no
 API keys, no charges. It exposes three tools over stdio:
 
-- `web_search(query)` — DuckDuckGo top results
+- `web_search(query)` — Google top related results
 - `fetch_page(url)` — readable text of any web page
 - `wikipedia(query)` — Wikipedia summary of the top article
 
@@ -121,14 +130,77 @@ Use it in any MCP client. For **Claude Desktop**, add to `claude_desktop_config.
 The Chrome extension agent already uses the same free tools directly
 (`web_search` + `fetch_url`), so no MCP setup is needed for it.
 
+## CLI
+
+A terminal interface reusing the exact same Agent Core (no duplicated logic):
+
+```powershell
+node cli/myagent.js                              # interactive (cwd = project root)
+node cli/myagent.js "Fix the login bug"          # one-shot
+node cli/myagent.js -p C:\proj -m qwen2.5-coder:14b -y "Refactor X"
+```
+
+Options: `-p/--project`, `-m/--model`, `-y/--yes` (auto-approve). Interactive commands:
+`/models`, `/clear`, `/exit`. Dangerous actions prompt
+`Allow … [y=once / s=session / a=always / N=deny]`.
+
+## Desktop app (WPF)
+
+A Windows desktop client (like Claude Desktop) that talks to the same Agent Server
+over `http://127.0.0.1:8787`. Build and run with:
+
+```powershell
+dotnet run --project desktop/MyAgent.Desktop.csproj
+```
+
+Features: model picker, project root, streaming chat with thinking/tool activity,
+approve/deny with scope buttons (Once/Session/Always) for dangerous operations, and a
+stop button. Requires the .NET 10 SDK.
+
+## Model provider abstraction
+
+The Agent Core never talks to Ollama directly — it depends on the `IModelProvider`
+contract in `agent/provider.js`. `OllamaProvider` is the only implementation today
+(Ollama is the primary provider), so adding `OpenAIProvider`, `AnthropicProvider`,
+etc. later requires **no changes to the Agent Core, tools, or clients**.
+
+## Tests
+
+The Agent Core and tools have a test suite (Node's built-in runner, zero dependencies):
+
+```powershell
+cd agent
+npm test
+# or directly: node --test "../tests/*.test.js"
+```
+
+Covers path-traversal safety, read/write/edit/delete/list/search, git tools
+(including `git_commit`/`git_checkout`), tool-call normalization, the provider
+contract, and the always-allow permission store.
+
 ## Project layout
 
 ```
 agent/
-  server.js     HTTP server, sessions, approvals, SSE
-  ollama.js     thin Ollama HTTP client
-  tools.js      read_file / write_file / search_files / run_command (+ tool schemas)
-  agent.js      the agent loop + system prompt
+  server.js     HTTP server, sessions, approvals, SSE, stop
+  ollama.js     thin Ollama HTTP client (streaming)
+  provider.js   IModelProvider contract + OllamaProvider
+  permissions.js persistent "always allow" store (~/.myagent/permissions.json)
+  tools.js      file/git/shell/web tools + schemas
+  agent.js      the agent loop + system prompt + rules
+  web.js        free web search / fetch helpers
+cli/
+  myagent.js    CLI interface (reuses the Agent Core)
+desktop/
+  MyAgent.Desktop.csproj  WPF desktop app (client of the Agent Server)
+  MainWindow.xaml/.cs     streaming chat UI, approvals
+mcp/
+  server.js     free MCP server (web_search/fetch_page/wikipedia)
+tests/
+  tools.test.js     file/git tools + path safety
+  agent.test.js     tool-call normalization + prompt
+  provider.test.js  IModelProvider contract
+  permissions.test.js always-allow store
 extension/
   manifest.json MV3 manifest (side panel)
   sidepanel.html right-side panel UI
@@ -143,9 +215,10 @@ extension/
 - [x] Phase 2 — agent loop
 - [x] Phase 3 — `read_file`, `write_file`, `search_files`, `run_command`
 - [x] Phase 4 — Chrome extension UI (project + model selection, streaming chat)
-- [ ] Phase 5 — browser tools: `get_page`, `get_dom`, `click`, `type`, `screenshot` done; `get_console` not yet
-- [ ] Phase 6 — git support (safe wrappers around status/diff/commit)
-- [x] Phase 7 — approvals before dangerous operations
+- [x] Phase 5 — browser tools: `get_page`, `get_dom`, `click`, `type`, `scroll`, `screenshot`, `navigate`, `search`
+- [x] Phase 6 — git support (`git_status`, `git_diff`, `git_log`, `git_branch`, `git_checkout`, `git_commit`)
+- [x] Phase 7 — approvals before dangerous operations (once / session / always)
+- [x] Phase 8 — tests for the Agent Core and tools
 
 ## Troubleshooting
 

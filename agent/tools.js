@@ -6,11 +6,12 @@
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
 const { promisify } = require('util');
 
 const execAsync = promisify(exec);
-const { fetchPageText } = require('./web');
+const execFileAsync = promisify(execFile);
+const { fetchPageText, webSearch } = require('./web');
 
 const MAX_READ_LINES = 2000;
 const MAX_SEARCH_FILES = 1500;
@@ -248,44 +249,7 @@ function htmlDecode(s) {
 
 async function web_search(args) {
   const query = String((args && args.query) || '').trim();
-  if (!query) throw new Error('web_search requires a "query".');
-
-  const url = 'https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query);
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept-Language': 'en-US,en;q=0.9',
-    },
-  });
-  if (!res.ok) throw new Error(`Search request failed (HTTP ${res.status}).`);
-  const html = await res.text();
-
-  const linkRe = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-  const snippetRe = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/gi;
-  const links = [];
-  const snippets = [];
-  let m;
-  while ((m = linkRe.exec(html))) {
-    links.push({ href: m[1], title: htmlDecode(m[2]) });
-  }
-  while ((m = snippetRe.exec(html))) {
-    snippets.push(htmlDecode(m[1]));
-  }
-
-  const results = [];
-  for (let i = 0; i < Math.min(links.length, 8); i++) {
-    let real = links[i].href;
-    try {
-      const u = new URL(links[i].href, 'https://html.duckduckgo.com');
-      const uddg = u.searchParams.get('uddg');
-      if (uddg) real = decodeURIComponent(uddg);
-    } catch {}
-    results.push({ title: links[i].title, url: real, snippet: snippets[i] || '' });
-  }
-
-  if (!results.length) throw new Error('No search results found.');
-  return { query, source: 'DuckDuckGo', results };
+  return webSearch(query);
 }
 
 async function fetch_url(args) {
@@ -381,6 +345,63 @@ async function git_branch() {
   return { command: 'git branch --all', output };
 }
 
+/** Run git with an argument list (no shell) — safe for arbitrary messages/paths. */
+async function runGitFile(args) {
+  if (!projectRoot) throw new Error('No project selected. Set a project root before using git tools.');
+  try {
+    const { stdout, stderr } = await execFileAsync('git', args, {
+      cwd: path.resolve(projectRoot),
+      timeout: 60000,
+      maxBuffer: 5 * 1024 * 1024,
+      windowsHide: true,
+    });
+    return { ok: true, output: (stdout + (stderr ? '\n' + stderr : '')).trim() };
+  } catch (err) {
+    return { ok: false, output: ((err.stdout || '') + (err.stderr || err.message || '')).trim() };
+  }
+}
+
+async function git_checkout(args) {
+  if (typeof args.branch !== 'string' || !args.branch.trim()) {
+    throw new Error('git_checkout requires a non-empty "branch".');
+  }
+  const branch = args.branch.trim();
+  const res = await runGitFile(['checkout', branch]);
+  return { command: 'git checkout ' + branch, ok: res.ok, output: res.output || '(switched)' };
+}
+
+async function git_commit(args) {
+  if (typeof args.message !== 'string' || !args.message.trim()) {
+    throw new Error('git_commit requires a non-empty "message".');
+  }
+  const message = args.message.trim();
+  const files = Array.isArray(args.files) ? args.files : [];
+
+  const addArgs = ['add'];
+  if (args.all || files.length === 0) {
+    addArgs.push('-A');
+  } else {
+    for (const f of files) addArgs.push(resolveSafe(String(f)));
+  }
+
+  const add = await runGitFile(addArgs);
+  if (!add.ok) {
+    return { command: 'git commit -m "' + message + '"', ok: false, error: 'git add failed: ' + add.output };
+  }
+
+  // Show what is about to be committed (staged diff stat).
+  const stagedStat = await runGitFile(['diff', '--cached', '--stat']);
+
+  const commit = await runGitFile(['commit', '-m', message]);
+  return {
+    command: 'git commit -m "' + message + '"',
+    ok: commit.ok,
+    staged: add.output || '(nothing staged)',
+    stagedStat: stagedStat.output || '',
+    output: commit.output,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Registry + Ollama tool definitions
 // ---------------------------------------------------------------------------
@@ -398,6 +419,8 @@ const TOOL_FUNCTIONS = {
   git_diff,
   git_log,
   git_branch,
+  git_checkout,
+  git_commit,
 };
 
 // Browser tools are declared here but executed by the Chrome extension: the
@@ -482,7 +505,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'web_search',
       description:
-        'Search the web (DuckDuckGo) and return the top results with titles, URLs, and snippets. Use this whenever you do not know the answer or need current information.',
+        'Search the web on Google and return the top related results with titles and URLs. Use this whenever you do not know the answer or need current information.',
       parameters: {
         type: 'object',
         properties: {
@@ -586,6 +609,37 @@ const TOOL_DEFINITIONS = [
       name: 'git_branch',
       description: 'List git branches.',
       parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'git_checkout',
+      description: 'Switch to an existing branch (requires approval). Use git_branch first to see available branches.',
+      parameters: {
+        type: 'object',
+        properties: {
+          branch: { type: 'string', description: 'Branch name to check out, e.g. "main" or "feature/login".' },
+        },
+        required: ['branch'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'git_commit',
+      description:
+        'Stage and commit changes (requires approval). Show git_diff first so the user can review. By default stages all changes (-A); pass files to stage only specific paths.',
+      parameters: {
+        type: 'object',
+        properties: {
+          message: { type: 'string', description: 'Commit message.' },
+          files: { type: 'array', items: { type: 'string' }, description: 'Optional list of paths to stage (default: all changes).' },
+          all: { type: 'boolean', description: 'Stage all changes including untracked files (default when no files given).' },
+        },
+        required: ['message'],
+      },
     },
   },
   {
@@ -713,6 +767,7 @@ const TOOL_DEFINITIONS = [
 module.exports = {
   setProjectRoot,
   getProjectRoot,
+  resolveSafe,
   execute,
   TOOL_FUNCTIONS,
   TOOL_DEFINITIONS,

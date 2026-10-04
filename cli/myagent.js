@@ -13,9 +13,11 @@
 const readline = require('readline');
 const { runAgent } = require('../agent/agent');
 const { setProjectRoot, TOOL_DEFINITIONS, BROWSER_TOOLS } = require('../agent/tools');
-const { listModels } = require('../agent/ollama');
+const { OllamaProvider } = require('../agent/provider');
+const { loadAlwaysAllowed, allowAlways } = require('../agent/permissions');
 
-let model = process.env.OLLAMA_MODEL || 'qwen2.5-coder:14b';
+const provider = new OllamaProvider();
+let model = process.env.OLLAMA_MODEL || provider.defaultModel;
 let projectRoot = process.cwd();
 let oneShot = null;
 let autoApprove = false;
@@ -91,8 +93,17 @@ const rl = readline.createInterface({ input: process.stdin, output: process.stdo
 const question = (q) => new Promise((resolve) => rl.question(q, resolve));
 
 async function requestApproval(name, args) {
-  const ans = await question('\n  \u26A0 Allow ' + name + ' ' + JSON.stringify(args) + '? [y/N] ');
-  return ans.trim().toLowerCase() === 'y';
+  const ans = await question(
+    '\n  \u26A0 Allow ' + name + ' ' + JSON.stringify(args) + '? [y=once / s=session / a=always / N=deny] '
+  );
+  const a = ans.trim().toLowerCase();
+  if (a === 's') return { allowed: true, scope: 'session' };
+  if (a === 'a') {
+    allowAlways(name);
+    return { allowed: true, scope: 'always' };
+  }
+  if (a === 'y') return { allowed: true, scope: 'once' };
+  return { allowed: false };
 }
 
 let history = [];
@@ -117,6 +128,8 @@ async function ask(msg) {
       autoApprove,
       requestApproval,
       signal: ac.signal,
+      provider,
+      preApproved: loadAlwaysAllowed(),
       onEvent,
     });
     history = result.history;
@@ -143,7 +156,7 @@ async function repl() {
     }
     if (input === '/models') {
       try {
-        const ms = await listModels();
+        const ms = await provider.listModels();
         console.log('  ' + ms.join('\n  '));
       } catch (e) {
         console.log('  ' + paint(RED, 'Could not reach Ollama: ' + e.message));

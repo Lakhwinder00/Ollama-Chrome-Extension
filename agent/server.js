@@ -10,20 +10,23 @@
 
 const http = require('http');
 const { URL } = require('url');
-const { health, listModels, modelCapabilities, DEFAULT_OLLAMA_URL } = require('./ollama');
+const { OllamaProvider } = require('./provider');
+const { loadAlwaysAllowed, allowAlways } = require('./permissions');
 const { setProjectRoot, getProjectRoot, TOOL_DEFINITIONS } = require('./tools');
 const { runAgent } = require('./agent');
 
 const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || '127.0.0.1';
-const DEFAULT_MODEL = process.env.OLLAMA_MODEL || 'qwen2.5-coder:14b';
+
+const provider = new OllamaProvider();
+const DEFAULT_MODEL = provider.defaultModel;
 
 let capabilitiesCache = null;
 
 async function getCapabilities() {
   if (!capabilitiesCache) {
     try {
-      capabilitiesCache = await modelCapabilities();
+      capabilitiesCache = await provider.modelCapabilities();
     } catch {
       capabilitiesCache = {};
     }
@@ -41,7 +44,7 @@ function ensureSession(sessionId) {
   if (sessionId && sessions.has(sessionId)) return sessions.get(sessionId);
   const id =
     sessionId || `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-  const session = { id, model: DEFAULT_MODEL, messages: [] };
+  const session = { id, model: DEFAULT_MODEL, messages: [], approvedTools: new Set() };
   sessions.set(id, session);
   return session;
 }
@@ -55,15 +58,15 @@ const activeRuns = new Map();
 const pendingApprovals = new Map();
 let approvalSeq = 0;
 
-function requestApprovalFactory(emit) {
+function requestApprovalFactory(emit, session) {
   return (name, args) =>
     new Promise((resolve) => {
       const id = `a${++approvalSeq}`;
       const timer = setTimeout(() => {
         pendingApprovals.delete(id);
-        resolve(false);
+        resolve({ allowed: false });
       }, 5 * 60 * 1000);
-      pendingApprovals.set(id, { resolve, timer });
+      pendingApprovals.set(id, { resolve, timer, name, session });
       emit('approve_request', { id, name, arguments: args });
     });
 }
@@ -190,9 +193,11 @@ async function handleChat(req, res) {
       autoApprove: !!body.autoApprove,
       think,
       planFirst: !think,
-      requestApproval: requestApprovalFactory(emit),
+      requestApproval: requestApprovalFactory(emit, session),
       requestBrowser: requestBrowserFactory(emit),
       signal: ac.signal,
+      provider,
+      preApproved: [...new Set([...loadAlwaysAllowed(), ...session.approvedTools])],
       onEvent: (payload) => emit(payload && payload.type, payload),
     });
     session.messages = result.history;
@@ -215,8 +220,18 @@ async function handleApprove(req, res) {
   }
   clearTimeout(pending.timer);
   pendingApprovals.delete(body.id);
-  pending.resolve(!!body.allowed);
-  sendJson(res, 200, { ok: true, approved: !!body.allowed });
+  const allowed = !!body.allowed;
+  const scope = typeof body.scope === 'string' ? body.scope : 'once';
+  if (allowed) {
+    if (scope === 'always') {
+      allowAlways(pending.name);
+      pending.session.approvedTools.add(pending.name);
+    } else if (scope === 'session') {
+      pending.session.approvedTools.add(pending.name);
+    }
+  }
+  pending.resolve({ allowed, scope });
+  sendJson(res, 200, { ok: true, approved: allowed });
 }
 
 async function handleBrowserResult(req, res) {
@@ -251,14 +266,14 @@ async function route(req, res, pathname) {
   }
 
   if (req.method === 'GET' && pathname === '/health') {
-    const h = await health();
-    sendJson(res, 200, { ok: h.reachable, ollama: DEFAULT_OLLAMA_URL, ...h, project: getProjectRoot() });
+    const h = await provider.health();
+    sendJson(res, 200, { ok: h.reachable, ollama: provider.endpoint, ...h, project: getProjectRoot() });
     return;
   }
 
   if (req.method === 'GET' && pathname === '/models') {
     try {
-      const models = await listModels();
+      const models = await provider.listModels();
       capabilitiesCache = null; // re-read capabilities on next chat
       sendJson(res, 200, { ok: true, models });
     } catch (e) {
@@ -306,7 +321,7 @@ async function route(req, res, pathname) {
         'GET  /project',
         'POST /project   { root }',
         'POST /chat      { sessionId?, message, model?, autoApprove? }  (Server-Sent Events)',
-        'POST /approve   { id, allowed }',
+        'POST /approve   { id, allowed, scope? }   scope: once|session|always',
         'POST /browser/result { id, result | error }',
         'POST /stop      { sessionId }',
       ],
@@ -335,7 +350,8 @@ server.listen(PORT, HOST, () => {
   console.log('  Local Code Agent Server');
   console.log('  ─────────────────────────────────────────────');
   console.log(`  Listening on  http://${HOST}:${PORT}`);
-  console.log(`  Ollama        ${DEFAULT_OLLAMA_URL}`);
+  console.log(`  Provider      ${provider.name}`);
+  console.log(`  Endpoint      ${provider.endpoint}`);
   console.log(`  Default model ${DEFAULT_MODEL}`);
   console.log(`  Project root  ${getProjectRoot() || '(not set — use POST /project)'}`);
   console.log('');

@@ -6,10 +6,17 @@
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const { chatStream } = require('./ollama');
+const { OllamaProvider } = require('./provider');
 const { execute, getProjectRoot, TOOL_DEFINITIONS, BROWSER_TOOLS } = require('./tools');
 
-const DANGEROUS_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'run_command']);
+const DANGEROUS_TOOLS = new Set([
+  'write_file',
+  'edit_file',
+  'delete_file',
+  'run_command',
+  'git_commit',
+  'git_checkout',
+]);
 const MAX_ITERATIONS = 15;
 const MAX_HISTORY = 80;
 
@@ -41,7 +48,9 @@ function buildSystemPrompt() {
     '- git_diff() — show the uncommitted diff.',
     '- git_log(n?) — show recent commits.',
     '- git_branch() — list branches.',
-    '- web_search(query) — search the web (DuckDuckGo) and return top results with snippets.',
+    '- git_checkout(branch) — switch to a branch (requires approval).',
+    '- git_commit(message, files?, all?) — stage and commit changes (requires approval). Show git_diff first.',
+    '- web_search(query) — search the web on Google and return the top related links.',
     '- fetch_url(url) — fetch a web page and read its text (use after web_search to read a result).',
     '',
     "Browser tools (operate on the user's active Chrome tab):",
@@ -57,6 +66,13 @@ function buildSystemPrompt() {
     'When the user asks about the current page or the browser, use get_page or get_dom first.',
     "When the user refers to a page, profile, or website, read the active tab with get_page first. If it is not the right page, use search to find it on Google.",
     'After clicking, typing, or scrolling, take a screenshot to verify what happened.',
+    '',
+    'Browser task method (act on the active tab / a website, step by step like Claude):',
+    '1. Understand the page first. If the message contains an "[Active browser tab ...]" block, use it; otherwise call get_page or get_dom.',
+    '2. Before acting, write a short numbered plan: "Step 1: ...", "Step 2: ...", each naming the exact tool and target (selector/text/url).',
+    '3. Execute the plan one step at a time using the browser tools (click, type, navigate, scroll, search).',
+    '4. After each click/type/navigate, take a screenshot to verify. If it did not work, re-read the page (get_dom), revise the plan, and continue - never repeat the same failing action.',
+    '5. When the goal is done, stop and briefly summarize the steps performed and the result.',
     '',
     'Rules:',
     '1. Inspect the relevant files before changing them.',
@@ -158,6 +174,52 @@ function historyResult(result) {
   return s.length > MAX ? s.slice(0, MAX) + `\n...(truncated ${s.length - MAX} chars)` : s;
 }
 
+function shouldRunWebResearch(content) {
+  const text = String(content ?? '').trim();
+  if (!text) return true;
+  const normalized = text.replace(/\s+/g, ' ').toLowerCase();
+  if (normalized.length < 25) {
+    return /(i don['’]t know|not sure|unable to answer|cannot determine|can['’]t answer|not enough information|unknown|unsure)/i.test(text);
+  }
+  return /(i don['’]t know|not sure|unable to answer|cannot determine|can['’]t answer|not enough information|unknown|unsure|i do not know|i am not sure|i can['’]t tell)/i.test(text);
+}
+
+async function runWebResearchFallback(messages, onEvent = () => {}) {
+  const userMessages = (Array.isArray(messages) ? messages : []).filter((m) => m.role === 'user' && typeof m.content === 'string');
+  const query = (userMessages.at(-1)?.content || '').trim() || 'latest facts and official sources';
+  onEvent({ type: 'status', message: 'No answer from the model; checking web sources…' });
+
+  const search = await execute('web_search', { query });
+  onEvent({ type: 'tool', name: 'web_search', arguments: { query } });
+  onEvent({ type: 'tool_result', name: 'web_search', ok: true, summary: `search: ${search.query}`, detail: JSON.stringify(search.results.slice(0, 3), null, 2) });
+
+  const sources = Array.isArray(search && search.results) ? search.results.slice(0, 3) : [];
+  const snippets = [];
+  for (const result of sources) {
+    if (!result || !result.url) continue;
+    try {
+      const page = await execute('fetch_url', { url: result.url });
+      const text = String(page || '').slice(0, 1200).trim();
+      if (text) {
+        snippets.push({ title: result.title || result.url, url: result.url, text });
+      }
+    } catch (err) {
+      snippets.push({
+        title: result.title || result.url,
+        url: result.url,
+        text: `Could not read page: ${String(err && err.message ? err.message : err)}`,
+      });
+    }
+  }
+
+  const citeText = snippets.length
+    ? snippets.map((s) => `- ${s.title}: ${s.url}\n  ${s.text}`).join('\n\n')
+    : 'No web source could be read successfully.';
+
+  const answer = `I could not answer reliably from local context, so I checked the web.\n\n${citeText}`;
+  return { content: answer, sources };
+}
+
 /**
  * Convert a raw JSON object into the native Ollama tool-call shape:
  * { function: { name, arguments } } where arguments is a JSON string.
@@ -231,7 +293,7 @@ function parseToolCallsFromContent(content) {
 function normalizeToolCalls(toolCalls) {
   return (Array.isArray(toolCalls) ? toolCalls : []).map((tc) => {
     const fn = (tc && tc.function) || {};
-    const name = fn.name || tc.name;
+    const name = fn.name || (tc && tc.name);
     let args = fn.arguments;
     if (typeof args === 'string') {
       try {
@@ -256,16 +318,20 @@ async function runAgent({
   requestBrowser,
   signal,
   onEvent = () => {},
+  provider = new OllamaProvider(),
+  preApproved = [],
 }) {
   const history = ensureSystemMessage(messages);
   const recentCalls = [];
+  // Tool names already approved for this run (session scope or always-allow).
+  const sessionAllowed = new Set(Array.isArray(preApproved) ? preApproved : []);
 
   // For models without a native thinking stream (e.g. qwen2.5-coder), run a
   // short "think out loud" pass so the user can still see the model's plan.
   if (planFirst) {
     onEvent({ type: 'status', message: 'Planning…' });
     try {
-      await chatStream({
+      await provider.chatStream({
         model,
         messages: [...history, { role: 'user', content: PLAN_PROMPT }],
         think,
@@ -293,7 +359,7 @@ async function runAgent({
 
     let res;
     try {
-      res = await chatStream({
+      res = await provider.chatStream({
         model,
         messages: history,
         tools,
@@ -335,6 +401,11 @@ async function runAgent({
     });
 
     if (!toolCalls.length) {
+      if (shouldRunWebResearch(content)) {
+        const fallback = await runWebResearchFallback(history, onEvent);
+        history.push({ role: 'assistant', content: fallback.content });
+        return { content: fallback.content, history };
+      }
       return { content, history };
     }
 
@@ -359,8 +430,9 @@ async function runAgent({
         continue;
       }
 
-      if (DANGEROUS_TOOLS.has(name) && !autoApprove && typeof requestApproval === 'function') {
-        const approved = await requestApproval(name, args);
+      if (DANGEROUS_TOOLS.has(name) && !autoApprove && !sessionAllowed.has(name) && typeof requestApproval === 'function') {
+        const decision = await requestApproval(name, args);
+        const approved = decision && typeof decision === 'object' ? !!decision.allowed : !!decision;
         if (!approved) {
           onEvent({ type: 'tool_denied', name });
           history.push({
@@ -371,6 +443,8 @@ async function runAgent({
           });
           continue;
         }
+        const scope = decision && typeof decision === 'object' ? decision.scope : 'once';
+        if (scope === 'session' || scope === 'always') sessionAllowed.add(name);
       }
 
       let result;
@@ -395,8 +469,21 @@ async function runAgent({
 
   const final =
     'I reached the maximum number of steps without finishing. Please ask me to continue or narrow the task.';
+  if (shouldRunWebResearch(final)) {
+    const fallback = await runWebResearchFallback(history, onEvent);
+    history.push({ role: 'assistant', content: fallback.content });
+    return { content: fallback.content, history };
+  }
   onEvent({ type: 'status', message: 'Stopped: maximum steps reached.' });
   return { content: final, history };
 }
 
-module.exports = { runAgent, buildSystemPrompt };
+module.exports = {
+  runAgent,
+  buildSystemPrompt,
+  DANGEROUS_TOOLS,
+  convertToolCallObject,
+  parseToolCallsFromContent,
+  normalizeToolCalls,
+  shouldRunWebResearch,
+};
