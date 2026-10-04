@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Local Code Agent</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◮</span>
+      <div class="brand-text">
+        <h1>Local Code Agent</h1>
+        <span class="conn" id="conn">connecting…</span>
+      </div>
+    </div>
+    <button id="settingsBtn" class="icon-btn" title="Settings">⚙</button>
+  </header>
+
+  <section class="model-bar">
+    <label class="field">
+      <span>Model</span>
+      <div class="model-row">
+        <select id="modelSelect" title="Ollama model"></select>
+        <button id="refreshModels" class="icon-btn" title="Refresh models">⟳</button>
+      </div>
+    </label>
+  </section>
+
+  <section id="settingsPanel" class="settings hidden">
+    <label class="field">
+      <span>Server URL</span>
+      <input id="serverUrl" type="text" placeholder="http://127.0.0.1:8787" />
+    </label>
+    <label class="field checkbox">
+      <input id="autoApprove" type="checkbox" />
+      <span>Auto-approve write &amp; run (unsafe)</span>
+    </label>
+  </section>
+
+  <section class="project-bar">
+    <label class="field">
+      <span>Project root</span>
+      <div class="project-row">
+        <input id="projectRoot" type="text" placeholder="C:\path\to\your\project" />
+        <button id="setProject" class="link-btn">Set</button>
+      </div>
+    </label>
+  </section>
+
+  <main id="messages" class="messages"></main>
+
+  <section id="approval" class="approval hidden">
+    <div class="approval-text">
+      <strong id="approvalName">run_command</strong>
+      <pre id="approvalArgs"></pre>
+    </div>
+    <div class="approval-actions">
+      <button id="approveBtn" class="btn approve">Approve</button>
+      <button id="denyBtn" class="btn deny">Deny</button>
+    </div>
+  </section>
+
+  <footer class="composer">
+    <textarea id="input" rows="1" placeholder="Ask something…"></textarea>
+    <div class="composer-actions">
+      <button id="deleteHistory" class="icon-btn danger" title="Delete history">🗑</button>
+      <button id="newChat" class="icon-btn" title="New chat">＋</button>
+      <button id="stopBtn" class="send-btn stop" title="Stop" hidden>■</button>
+      <button id="send" class="send-btn">➤</button>
+    </div>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

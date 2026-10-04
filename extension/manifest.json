@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Local Code Agent",
+  "version": "1.1.0",
+  "description": "A Claude Code-like coding agent powered by a local Ollama model.",
+  "permissions": ["storage", "activeTab", "scripting", "sidePanel"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "<all_urls>"],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Open Local Code Agent"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

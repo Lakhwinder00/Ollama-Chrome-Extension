@@ -1,0 +1,14 @@
+{
+  "name": "local-code-agent-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local agent server that gives an Ollama coding model 'hands' (files, search, shell).",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
