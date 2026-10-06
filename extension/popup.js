@@ -788,8 +788,14 @@ async function checkHealth() {
     const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/health`);
     const data = await res.json();
     const connEl = $('conn');
-    connEl.textContent = data.ok ? '● connected' : '● ollama unreachable';
-    connEl.className = 'conn ' + (data.ok ? 'ok' : 'err');
+    if (data.ok) {
+      connEl.textContent = '● connected';
+      connEl.className = 'conn ok';
+      loadModels(); // Load models when server is up
+    } else {
+      connEl.textContent = '● ollama unreachable';
+      connEl.className = 'conn err';
+    }
   } catch (e) {
     const connEl = $('conn');
     connEl.textContent = '● server offline';
@@ -809,9 +815,10 @@ function defaultModelChoice(list) {
 
 async function loadModels() {
   try {
+    // Try to fetch models from local Ollama server
     const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/models`);
     const data = await res.json();
-    if (data.ok && Array.isArray(data.models)) {
+    if (data.ok && Array.isArray(data.models) && data.models.length > 0) {
       models = data.models;
       const sel = $('modelSelect');
       sel.innerHTML = '';
@@ -822,18 +829,60 @@ async function loadModels() {
         sel.appendChild(o);
       });
       const local = models.filter((m) => !isCloudModel(m));
+      
+      // Set model to default if it's not already set or is a cloud model
       const needsReset =
         !settings.model ||
         (isCloudModel(settings.model) && local.length) ||
         !models.includes(settings.model);
+        
       if (needsReset && models.length) {
         settings.model = defaultModelChoice(models);
         saveSettings();
+        sel.value = settings.model || '';
+        // Notify user of model selection
+        appendStatus(`Selected local model: ${settings.model}`);
+      } else {
+        sel.value = settings.model || '';
       }
-      sel.value = settings.model || '';
+    } else {
+      // If no models are found, show error message in UI
+      const connEl = $('conn');
+      connEl.textContent = '● server online (no models)';
+      connEl.className = 'conn err';
+      
+      // Try to prompt user to check Ollama
+      appendStatus('ℹ Check if Ollama is running and has local models');
     }
   } catch (e) {
-    // server offline; ignore
+    const connEl = $('conn');
+    connEl.textContent = '● server offline';
+    connEl.className = 'conn err';
+    // Provide troubleshooting message
+    appendStatus('✖ Could not connect to Ollama server. Make sure Ollama is running at ' + 
+      (settings.serverUrl || DEFAULT_SERVER));
+  }
+}
+
+async function setProject() {
+  const root = $('projectRoot').value.trim();
+  if (!root) return;
+  try {
+    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/project`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ root }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      appendStatus('✖ ' + data.error);
+      return;
+    }
+    settings.projectRoot = data.root;
+    saveSettings();
+    appendStatus('Project set: ' + data.root);
+  } catch (e) {
+    appendStatus('✖ Could not reach server to set project. Please ensure Ollama is running.');
   }
 }
 
@@ -931,8 +980,8 @@ function init() {
     }
   });
   inputEl.addEventListener('input', autoGrow);
-  $('newChat').addEventListener('click', newChat);
-  $('deleteHistory').addEventListener('click', deleteHistory);
+  $('newChatBtn').addEventListener('click', newChat);
+  $('clearHistoryBtn').addEventListener('click', deleteHistory);
   $('stopBtn').addEventListener('click', stopRun);
   $('settingsBtn').addEventListener('click', () =>
     $('settingsPanel').classList.toggle('hidden')

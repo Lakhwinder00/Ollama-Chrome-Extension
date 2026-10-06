@@ -68,6 +68,15 @@
 
   <main id="messages" class="messages"></main>
 
+  <div class="chat-controls">
+    <button id="newChatBtn" class="control-btn" title="New chat">
+      <span>＋</span> New Chat
+    </button>
+    <button id="clearHistoryBtn" class="control-btn danger" title="Delete history">
+      <span>🗑</span> Clear History
+    </button>
+  </div>
+
   <section id="approval" class="approval hidden">
     <div class="approval-text">
       <strong id="approvalName">run_command</strong>
@@ -84,8 +93,6 @@
   <footer class="composer">
     <textarea id="input" rows="1" placeholder="Ask something…"></textarea>
     <div class="composer-actions">
-      <button id="deleteHistory" class="icon-btn danger" title="Delete history">🗑</button>
-      <button id="newChat" class="icon-btn" title="New chat">＋</button>
       <button id="stopBtn" class="send-btn stop" title="Stop" hidden>■</button>
       <button id="send" class="send-btn">➤</button>
     </div>
