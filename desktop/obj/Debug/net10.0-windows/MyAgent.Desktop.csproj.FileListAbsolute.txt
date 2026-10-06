@@ -17,3 +17,4 @@ C:\Development\Ollama-Chrome-Extension\desktop\obj\Debug\net10.0-windows\refint\
 C:\Development\Ollama-Chrome-Extension\desktop\obj\Debug\net10.0-windows\MyAgent.Desktop.pdb
 C:\Development\Ollama-Chrome-Extension\desktop\obj\Debug\net10.0-windows\MyAgent.Desktop.genruntimeconfig.cache
 C:\Development\Ollama-Chrome-Extension\desktop\obj\Debug\net10.0-windows\ref\MyAgent.Desktop.dll
+C:\Development\Ollama-Chrome-Extension\desktop\obj\Debug\net10.0-windows\MyAgent.Desktop.sourcelink.json

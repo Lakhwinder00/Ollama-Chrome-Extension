@@ -1,0 +1,54 @@
+name: Local Config
+version: 1.0.0
+schema: v1
+models:
+  - name: Qwen2.5-Coder 14B (Local)
+    provider: ollama
+    model: qwen2.5-coder:14b
+    roles:
+      - chat
+      - edit
+      - apply
+    contextLength: 32768
+  - name: Qwen3-Coder 30B Autocomplete
+    provider: ollama
+    model: qwen3-coder:30b
+    roles:
+      - autocomplete
+    contextLength: 8192
+    autocompleteOptions:
+      debounceDelay: 300
+      maxPromptTokens: 400
+      prefixPercentage: 0.85
+      multilineCompletions: auto
+      useCache: true
+      onlyMyCode: false
+      useOtherFiles: true
+  - name: Nomic Embed
+    provider: ollama
+    model: nomic-embed-text:latest
+    roles:
+      - embed
+  - name: Autodetect
+    provider: ollama
+    model: AUTODETECT
+context:
+  - provider: codebase
+    params:
+      nRetrieve: 75
+      nFinal: 30
+      useReranking: true
+  - provider: code
+  - provider: file
+  - provider: folder
+  - provider: open
+  - provider: tree
+  - provider: repo-map
+  - provider: diff
+  - provider: terminal
+  - provider: problems
+rules:
+  - Always read the full file content before answering questions about code.
+  - When asked about the project, use @codebase to search all files first.
+  - You have full access to all project files via the context providers.
+  - Always provide complete, working code when making edits.

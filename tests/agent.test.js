@@ -71,23 +71,24 @@ test('shouldRunWebResearch triggers when the model gives no usable answer', () =
   assert.equal(shouldRunWebResearch('Sorry, I can\'t answer that.'), true);
 });
 
-test('webSearch parses Google result URLs and marks the source as Google', async () => {
+test('webSearch parses DuckDuckGo result URLs and marks the source', async () => {
   const originalFetch = global.fetch;
   global.fetch = async () => ({
     ok: true,
     status: 200,
     text: async () => `
       <html><body>
-        <a href="/url?q=https%3A%2F%2Fexample.com%2Fdocs&sa=U&ved=2ahUKE">Example Docs</a>
-        <div>Helpful answer snippet</div>
-        <a href="/url?q=https%3A%2F%2Fexample.org%2Fmore&sa=U&ved=2ahUKE">More Info</a>
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https://example.com/docs">Example Docs</a>
+        <div class="result__snippet">Helpful answer snippet</div>
+        <a class="result__a" href="//duckduckgo.com/l/?uddg=https://example.org/more">More Info</a>
+        <div class="result__snippet">More information snippet</div>
       </body></html>
     `,
   });
 
   try {
     const r = await webSearch('test query');
-    assert.equal(r.source, 'Google');
+    assert.equal(r.source, 'DuckDuckGo');
     assert.equal(r.results[0].title, 'Example Docs');
     assert.match(r.results[0].url, /example\.com/);
     assert.equal(r.results[1].title, 'More Info');

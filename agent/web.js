@@ -1,7 +1,10 @@
 /**
  * Shared free web helpers — no API keys, no charges.
- *  - webSearch: Google HTML search (top results with related links)
+ *  - webSearch: DuckDuckGo HTML search (primary) with Bing RSS fallback
  *  - fetchPageText: fetch a URL and extract readable text
+ *
+ * Note: Google HTML scraping was removed — Google now serves a JS-only page
+ * to server-side requests, so no result links can be parsed from it.
  */
 
 const UA =
@@ -29,43 +32,117 @@ function htmlDecode(s) {
     .trim();
 }
 
+/** DuckDuckGo HTML endpoint — primary source (no key, no JS required). */
+async function searchDuckDuckGo(q) {
+  const res = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), {
+    headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' },
+  });
+  if (res.status === 403 || res.status === 429) {
+    throw new Error('DuckDuckGo blocked this request (rate limit or bot detection).');
+  }
+  if (!res.ok) throw new Error(`DuckDuckGo request failed (HTTP ${res.status}).`);
+  const html = await res.text();
+
+  const titles = new Map(); // url -> title
+  const snippets = new Map(); // url -> snippet
+  const seen = new Set();
+  const results = [];
+
+  const decodeDdgUrl = (href) => {
+    try {
+      const full = href.startsWith('//') ? 'https:' + href : href;
+      const u = new URL(full, 'https://duckduckgo.com');
+      const uddg = u.searchParams.get('uddg');
+      const raw = uddg ? decodeURIComponent(uddg) : full;
+      const parsed = new URL(raw);
+      if (!/^https?:$/i.test(parsed.protocol)) return null;
+      return parsed.toString();
+    } catch {
+      return null;
+    }
+  };
+
+  // Result titles: <a ... class="result__a" href="//duckduckgo.com/l/?uddg=<target>&...">Title</a>
+  const titleRe = /<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = titleRe.exec(html))) {
+    const real = decodeDdgUrl(m[1]);
+    const title = htmlDecode(m[2]);
+    if (!real || !title || seen.has(real)) continue;
+    seen.add(real);
+    titles.set(real, title);
+    results.push({ title, url: real, snippet: '' });
+  }
+
+  // Snippets: <a class="result__snippet" href="...same redirect...">Snippet text</a>
+  const snipRe = /<a[^>]*class="result__snippet"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  while ((m = snipRe.exec(html))) {
+    const real = decodeDdgUrl(m[1]);
+    if (!real) continue;
+    const snippet = htmlDecode(m[2]);
+    if (real && snippet && !snippets.has(real)) snippets.set(real, snippet);
+  }
+  for (const r of results) {
+    if (snippets.has(r.url)) r.snippet = snippets.get(r.url);
+  }
+
+  return { source: 'DuckDuckGo', results };
+}
+
+/** Bing RSS endpoint — fallback source (clean XML, easy to parse). */
+async function searchBingRss(q) {
+  const res = await fetch('https://www.bing.com/search?q=' + encodeURIComponent(q) + '&format=rss', {
+    headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' },
+  });
+  if (res.status === 403 || res.status === 429) {
+    throw new Error('Bing blocked this request (rate limit or bot detection).');
+  }
+  if (!res.ok) throw new Error(`Bing request failed (HTTP ${res.status}).`);
+  const xml = await res.text();
+
+  const results = [];
+  const seen = new Set();
+  const itemRe = /<item>([\s\S]*?)<\/item>/gi;
+  const tag = (block, name) => {
+    const mm = new RegExp('<' + name + '>([\\s\\S]*?)</' + name + '>', 'i').exec(block);
+    return mm ? htmlDecode(mm[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')) : '';
+  };
+  let m;
+  while ((m = itemRe.exec(xml))) {
+    const block = m[1];
+    const url = tag(block, 'link').trim();
+    const title = tag(block, 'title').trim();
+    if (!url || !title || seen.has(url)) continue;
+    try {
+      const parsed = new URL(url);
+      if (!/^https?:$/i.test(parsed.protocol)) continue;
+    } catch {
+      continue;
+    }
+    seen.add(url);
+    results.push({ title, url, snippet: tag(block, 'description').trim() });
+  }
+  return { source: 'Bing', results };
+}
+
 async function webSearch(query) {
   const q = String(query || '').trim();
   if (!q) throw new Error('web_search requires a "query".');
   await politeDelay();
-  const url = 'https://www.google.com/search?q=' + encodeURIComponent(q) + '&hl=en&num=10';
-  const res = await fetch(url, {
-    headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' },
-  });
-  if (res.status === 403 || res.status === 429) {
-    throw new Error('Google blocked this request (rate limit or bot detection). Wait a moment and retry, or use the browser search tools.');
-  }
-  if (!res.ok) throw new Error(`Search request failed (HTTP ${res.status}).`);
-  const html = await res.text();
 
-  const results = [];
-  const seen = new Set();
-  const linkRe = /<a[^>]+href="\/url\?q=([^"&]+)[^\"]*"[^>]*>([\s\S]*?)<\/a>/gi;
-  let match;
-  while ((match = linkRe.exec(html))) {
-    const rawUrl = match[1];
-    const title = htmlDecode(match[2]);
-    if (!rawUrl || !title) continue;
+  const errors = [];
+  for (const fn of [searchDuckDuckGo, searchBingRss]) {
     try {
-      const decoded = decodeURIComponent(rawUrl);
-      const parsed = new URL(decoded);
-      if (!/^https?:$/i.test(parsed.protocol)) continue;
-      const real = parsed.toString();
-      if (seen.has(real)) continue;
-      seen.add(real);
-      results.push({ title, url: real, snippet: '' });
-    } catch {
-      // ignore non-URL or malformed matches
+      const { source, results } = await fn(q);
+      if (results && results.length) {
+        return { query: q, source, results: results.slice(0, 8) };
+      }
+      errors.push(`${fn.name}: no results parsed`);
+    } catch (e) {
+      errors.push(`${fn.name}: ${e.message}`);
     }
   }
-
-  if (!results.length) throw new Error('No search results found.');
-  return { query: q, source: 'Google', results: results.slice(0, 8) };
+  throw new Error(`No search results found. (${errors.join('; ')})`);
 }
 
 async function fetchPageText(url) {

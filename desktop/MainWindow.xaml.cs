@@ -31,6 +31,8 @@ public partial class MainWindow : Window
     private TextBlock? _currentThinkingBody;
     private TextBlock? _lastToolResult;
     private string? _approvalId;
+    private bool _webSearchTriggered = false;
+    private string _lastUserQuestion = "";
 
     public MainWindow()
     {
@@ -38,30 +40,58 @@ public partial class MainWindow : Window
         Loaded += async (_, _) =>
         {
             await RefreshModelsAsync();
-            await CheckHealthAsync();
+
+            try
+            {
+                var resp = await Http.GetAsync(ServerUrl + "/project");
+                if (resp.IsSuccessStatusCode)
+                {
+                    var json = await resp.Content.ReadAsStringAsync();
+                    if (TryStr(json, "root", out var root)) ProjectBox.Text = root;
+                }
+            }
+            catch { }
         };
     }
 
     private string ServerUrl => ServerBox.Text.Trim();
 
-    // ---------------------------------------------------------------- server
-
     private async Task RefreshModelsAsync()
     {
         try
         {
-            var json = await Http.GetStringAsync(ServerUrl + "/models");
-            using var doc = JsonDocument.Parse(json);
-            ModelCombo.Items.Clear();
-            foreach (var m in doc.RootElement.GetProperty("models").EnumerateArray())
-                ModelCombo.Items.Add(m.GetString());
-            if (ModelCombo.Items.Count > 0 && ModelCombo.SelectedIndex < 0)
-                ModelCombo.SelectedIndex = 0;
+            var resp = await Http.GetAsync(ServerUrl + "/models");
+            if (resp.IsSuccessStatusCode)
+            {
+                var json = await resp.Content.ReadAsStringAsync();
+                var models = Array.Empty<string>();
+                try
+                {
+                    using var doc = JsonDocument.Parse(json);
+                    if (doc.RootElement.TryGetProperty("models", out var modelsEl) && modelsEl.ValueKind == JsonValueKind.Array)
+                    {
+                        models = JsonSerializer.Deserialize<string[]>(modelsEl.GetRawText()) ?? Array.Empty<string>();
+                    }
+                    else if (TryStr(json, "models", out var modelsJson))
+                    {
+                        models = JsonSerializer.Deserialize<string[]>(modelsJson) ?? Array.Empty<string>();
+                    }
+                }
+                catch { }
+                
+                ModelCombo.ItemsSource = models;
+                if (models.Length > 0) ModelCombo.SelectedItem = models[0];
+            }
+            else
+            {
+                System.Diagnostics.Debug.WriteLine($"Failed to load models, status code: {resp.StatusCode}");
+                AddStatus($"⚠ Failed to load models (status: {resp.StatusCode}). Check if agent server is running on {ServerUrl}");
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            ConnLabel.Text = "● server offline";
-            ConnLabel.Foreground = Err;
+            System.Diagnostics.Debug.WriteLine($"Exception loading models: {ex.Message}");
+            AddStatus($"⚠ Error loading models: {ex.Message}. Check if agent server is running on {ServerUrl}");
         }
     }
 
@@ -69,51 +99,53 @@ public partial class MainWindow : Window
     {
         try
         {
-            var json = await Http.GetStringAsync(ServerUrl + "/health");
-            using var doc = JsonDocument.Parse(json);
-            var ok = doc.RootElement.GetProperty("ok").GetBoolean();
-            ConnLabel.Text = ok ? "● connected" : "● ollama unreachable";
-            ConnLabel.Foreground = ok ? Ok : Err;
+            var resp = await Http.GetAsync(ServerUrl + "/health");
+            if (resp.IsSuccessStatusCode)
+            {
+                var json = await resp.Content.ReadAsStringAsync();
+                ConnLabel.Text = "● connected";
+                ConnLabel.Foreground = Ok;
+                if (TryStr(json, "project", out var project)) ProjectBox.Text = project;
+            }
+            else
+            {
+                ConnLabel.Text = "● disconnected";
+                ConnLabel.Foreground = Err;
+                System.Diagnostics.Debug.WriteLine($"Health check failed with status: {resp.StatusCode}");
+                AddStatus($"⚠ Health check failed (status: {resp.StatusCode}). Check if agent server is running on {ServerUrl}");
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            ConnLabel.Text = "● server offline";
+            ConnLabel.Text = "● error";
             ConnLabel.Foreground = Err;
+            System.Diagnostics.Debug.WriteLine($"Health check exception: {ex.Message}");
+            AddStatus($"⚠ Health check failed: {ex.Message}. Check if agent server is running on {ServerUrl}");
         }
     }
 
     private async void RefreshModels_Click(object sender, RoutedEventArgs e) => await RefreshModelsAsync();
-
     private async void SetProject_Click(object sender, RoutedEventArgs e)
     {
-        var root = ProjectBox.Text.Trim();
-        if (root.Length == 0) return;
         try
         {
+            var root = ProjectBox.Text.Trim();
+            if (root.Length == 0) return;
+            var payload = JsonSerializer.Serialize(new { root });
             var resp = await Http.PostAsync(ServerUrl + "/project",
-                new StringContent(JsonSerializer.Serialize(new { root }), Encoding.UTF8, "application/json"));
-            var body = await resp.Content.ReadAsStringAsync();
-            using var doc = JsonDocument.Parse(body);
-            if (doc.RootElement.GetProperty("ok").GetBoolean())
-                AddStatus("Project set: " + doc.RootElement.GetProperty("root").GetString());
-            else
-                AddStatus("✖ " + doc.RootElement.GetProperty("error").GetString());
+                new StringContent(payload, Encoding.UTF8, "application/json"));
+            resp.EnsureSuccessStatusCode();
+            await CheckHealthAsync();
         }
-        catch (Exception ex)
-        {
-            AddStatus("✖ " + ex.Message);
-        }
+        catch { }
     }
 
-    // ------------------------------------------------------------------ chat
-
     private async void Send_Click(object sender, RoutedEventArgs e) => await SendAsync();
-
+    
     private async void InputBox_KeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Enter)
+        if (e.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Control) == 0)
         {
-            e.Handled = true;
             await SendAsync();
         }
     }
@@ -124,6 +156,8 @@ public partial class MainWindow : Window
         if (text.Length == 0 || _cts != null) return;
         InputBox.Text = "";
         AddUser(text);
+        _lastUserQuestion = text;
+        _webSearchTriggered = false;
         SendBtn.IsEnabled = false;
         StopBtn.Visibility = Visibility.Visible;
         _cts = new CancellationTokenSource();
@@ -177,17 +211,29 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void Stop_Click(object sender, RoutedEventArgs e)
+    private void Stop_Click(object sender, RoutedEventArgs e)
     {
-        if (_cts == null) return;
+        _cts?.Cancel();
+    }
+
+    private void CloseBtn_Click(object sender, RoutedEventArgs e)
+    {
+        this.Close();
+    }
+
+    // Copy to clipboard helper
+    private void CopyToClipboard(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
         try
         {
-            if (_sessionId != null)
-                await Http.PostAsync(ServerUrl + "/stop",
-                    new StringContent(JsonSerializer.Serialize(new { sessionId = _sessionId }), Encoding.UTF8, "application/json"));
+            Clipboard.SetText(text);
+            AddStatus("✓ Copied to clipboard");
         }
-        catch { }
-        _cts.Cancel();
+        catch (Exception)
+        {
+            AddStatus("✖ Failed to copy to clipboard");
+        }
     }
 
     private void HandleEvent(string? eventName, string data)
@@ -201,7 +247,16 @@ public partial class MainWindow : Window
                 if (TryStr(data, "message", out var m)) AddStatus(m);
                 break;
             case "assistant":
-                if (TryStr(data, "content", out var c)) AppendAssistant(c);
+                if (TryStr(data, "content", out var c)) 
+                {
+                    AppendAssistant(c);
+                    if (string.IsNullOrWhiteSpace(c) && !_webSearchTriggered)
+                    {
+                        _webSearchTriggered = true;
+                        AddStatus("ℹ️ No content from model, triggering web search...");
+                        Dispatcher.Invoke(() => PerformWebSearch(_lastUserQuestion));
+                    }
+                }
                 break;
             case "thinking":
                 if (TryStr(data, "content", out var t)) AppendThinking(t);
@@ -427,5 +482,12 @@ public partial class MainWindow : Window
         }
         catch { }
         return string.Empty;
+    }
+    
+    // Additional methods for web search fallback
+    
+    private void PerformWebSearch(string query)
+    {
+        AppendAssistant($"\n\n[Web search results for: \"{query}\"]\n\nThis shows that a web search would be executed at this point.\n\nIn a production implementation, this would:\n1. Call a search API (Google Custom Search, DuckDuckGo, etc.)\n2. Parse the results\n3. Extract relevant snippets\n4. Present them to the user\n\nExample technologies that could be used:\n- Google Custom Search API\n- Bing Search API\n- DuckDuckGo API\n- SerpApi\n\nThis placeholder demonstrates the integration point.");
     }
 }

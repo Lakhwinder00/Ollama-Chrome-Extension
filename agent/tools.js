@@ -737,11 +737,12 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'navigate',
       description:
-        'Open a URL in the active browser tab. Use this to visit a page or search engine when you need information you do not already have.',
+        'Open a URL in the active browser tab. Use this to visit a page or search engine when you need information you do not already have. Requires Chrome extension popup to be open.',
       parameters: {
         type: 'object',
         properties: {
           url: { type: 'string', description: 'Full URL to open, e.g. "https://www.google.com/search?q=upwork" or "https://en.wikipedia.org/wiki/X".' },
+          timeout: { type: 'integer', description: 'Optional timeout in milliseconds (default 30000, max 120000).', minimum: 5000, maximum: 120000 },
         },
         required: ['url'],
       },
