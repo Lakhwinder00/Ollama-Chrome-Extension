@@ -18,3 +18,15 @@ C:\Development\Ollama-Chrome-Extension\desktop\obj\Debug\net10.0-windows\MyAgent
 C:\Development\Ollama-Chrome-Extension\desktop\obj\Debug\net10.0-windows\MyAgent.Desktop.genruntimeconfig.cache
 C:\Development\Ollama-Chrome-Extension\desktop\obj\Debug\net10.0-windows\ref\MyAgent.Desktop.dll
 C:\Development\Ollama-Chrome-Extension\desktop\obj\Debug\net10.0-windows\MyAgent.Desktop.sourcelink.json
+C:\Development\Ollama-Chrome-Extension\desktop\obj\Debug\net10.0-windows\MyAgent.Desktop.csproj.AssemblyReference.cache
+C:\Development\Ollama-Chrome-Extension\desktop\obj\Debug\net10.0-windows\MyAgent.Desktop_Content.g.cs
+C:\Development\Ollama-Chrome-Extension\desktop\bin\Debug\net10.0-windows\runtimes\win-x86\native\WebView2Loader.dll
+C:\Development\Ollama-Chrome-Extension\desktop\bin\Debug\net10.0-windows\runtimes\win-x64\native\WebView2Loader.dll
+C:\Development\Ollama-Chrome-Extension\desktop\bin\Debug\net10.0-windows\runtimes\win-arm64\native\WebView2Loader.dll
+C:\Development\Ollama-Chrome-Extension\desktop\bin\Debug\net10.0-windows\Microsoft.Web.WebView2.Core.dll
+C:\Development\Ollama-Chrome-Extension\desktop\bin\Debug\net10.0-windows\Microsoft.Web.WebView2.WinForms.dll
+C:\Development\Ollama-Chrome-Extension\desktop\bin\Debug\net10.0-windows\Microsoft.Web.WebView2.Wpf.dll
+C:\Development\Ollama-Chrome-Extension\desktop\bin\Debug\net10.0-windows\Microsoft.Web.WebView2.Core.xml
+C:\Development\Ollama-Chrome-Extension\desktop\bin\Debug\net10.0-windows\Microsoft.Web.WebView2.WinForms.xml
+C:\Development\Ollama-Chrome-Extension\desktop\bin\Debug\net10.0-windows\Microsoft.Web.WebView2.Wpf.xml
+C:\Development\Ollama-Chrome-Extension\desktop\obj\Debug\net10.0-windows\MyAgent..837D3273.Up2Date

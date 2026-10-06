@@ -7,8 +7,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 
 namespace MyAgent.Desktop;
 
@@ -37,6 +39,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        
+        // Initialize
         Loaded += async (_, _) =>
         {
             await RefreshModelsAsync();
@@ -484,10 +488,182 @@ public partial class MainWindow : Window
         return string.Empty;
     }
     
-    // Additional methods for web search fallback
-    
-    private void PerformWebSearch(string query)
+    // Web search integration
+    private const string BingSearchEndpoint = "https://api.bing.microsoft.com/v7.0/search";
+    private const string BingSearchSubscriptionKey = "YOUR_BING_SEARCH_API_KEY_HERE"; // Set your Bing Search API key here
+
+    private async void PerformWebSearch(string query)
     {
-        AppendAssistant($"\n\n[Web search results for: \"{query}\"]\n\nThis shows that a web search would be executed at this point.\n\nIn a production implementation, this would:\n1. Call a search API (Google Custom Search, DuckDuckGo, etc.)\n2. Parse the results\n3. Extract relevant snippets\n4. Present them to the user\n\nExample technologies that could be used:\n- Google Custom Search API\n- Bing Search API\n- DuckDuckGo API\n- SerpApi\n\nThis placeholder demonstrates the integration point.");
+        try
+        {
+            AppendAssistant($"\n\n[Web search results for: \"{query}\"]\n\n");
+
+            var request = new HttpRequestMessage(HttpMethod.Get, $"{BingSearchEndpoint}?q={Uri.EscapeDataString(query)}&count=10&offset=0&freshness=Day&textFormat=Raw&responseFormat=Json");
+            
+            if (!string.IsNullOrEmpty(BingSearchSubscriptionKey))
+            {
+                request.Headers.Add("Ocp-Apim-Subscription-Key", BingSearchSubscriptionKey);
+            }
+
+            using var resp = await Http.SendAsync(request);
+            if (!resp.IsSuccessStatusCode)
+            {
+                AddStatus($"⚠ Web search failed (status: {resp.StatusCode})");
+                AppendAssistant("\n❌ Web search failed. No results available.\n");
+                return;
+            }
+
+            var json = await resp.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (!root.TryGetProperty("webPages", out var webPages))
+            {
+                AppendAssistant("\n❌ No web pages found in search results.\n");
+                return;
+            }
+
+            if (webPages.ValueKind == JsonValueKind.Null || !webPages.TryGetProperty("value", out var results))
+            {
+                AppendAssistant("\n❌ No search results available.\n");
+                return;
+            }
+
+            var resultItems = results.Deserialize<JsonElement[]>();
+            var hasImages = false;
+
+            foreach (var result in resultItems)
+            {
+                var title = GetStrResult(result, "name");
+                var snippet = GetStrResult(result, "snippet");
+                var url = GetStrResult(result, "url");
+
+                if (string.IsNullOrEmpty(title) && string.IsNullOrEmpty(snippet)) continue;
+
+                // Check if this result has images
+                var imageUrl = ExtractFirstImageUrl(snippet);
+                if (!string.IsNullOrEmpty(imageUrl)) hasImages = true;
+
+                // Display result with appropriate formatting
+                var resultText = $"\n▶ {title}\n{snippet}\n🔗 {url}\n";
+                AppendAssistant(resultText);
+
+                // If image is available, display it
+                if (!string.IsNullOrEmpty(imageUrl))
+                {
+                    ShowImageInChat(imageUrl, $"Related image for: {title}");
+                }
+            }
+
+            if (!hasImages)
+            {
+                AppendAssistant("\nℹ️ No images found in search results.\n");
+            }
+        }
+        catch (Exception ex)
+        {
+            AddStatus($"⚠ Web search error: {ex.Message}");
+            AppendAssistant($"\n❌ Web search error: {ex.Message}\n");
+        }
     }
+
+    private static string GetStrResult(JsonElement result, string key)
+    {
+        try
+        {
+            if (result.TryGetProperty(key, out var prop) && prop.ValueKind == JsonValueKind.String)
+                return prop.GetString() ?? string.Empty;
+        }
+        catch { }
+        return string.Empty;
+    }
+
+    private static string ExtractFirstImageUrl(string text)
+    {
+        try
+        {
+            // Look for common image URL patterns in text
+            var imgMatch = System.Text.RegularExpressions.Regex.Match(text, @"(https?://[^\s]+(?:png|jpe?g|gif|webp)(?:\?[^\s]*)?)", 
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (imgMatch.Success)
+                return imgMatch.Value;
+        }
+        catch { }
+        return string.Empty;
+    }
+
+    // Method for displaying images in chat with proper binding
+    private void ShowImageInChat(string imageUrl, string caption = "")
+    {
+        try
+        {
+            var border = new Border
+            {
+                Background = Panel,
+                BorderBrush = Border,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(8),
+                Margin = new Thickness(0, 4, 0, 0),
+            };
+
+            var stack = new StackPanel();
+
+            // Load actual image from URL
+            var image = new System.Windows.Controls.Image
+            {
+                Source = new System.Windows.Media.Imaging.BitmapImage(new Uri(imageUrl)),
+                Stretch = System.Windows.Media.Stretch.Uniform,
+                MaxWidth = 720,
+                MaxHeight = 400,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+
+            stack.Children.Add(image);
+
+            if (!string.IsNullOrEmpty(caption))
+            {
+                var captionBlock = new TextBlock
+                {
+                    Text = caption,
+                    Foreground = Muted,
+                    FontSize = 12,
+                    TextWrapping = TextWrapping.Wrap,
+                    Margin = new Thickness(0, 0, 0, 4)
+                };
+                stack.Children.Add(captionBlock);
+            }
+
+            border.Child = stack;
+            ChatPanel.Children.Add(border);
+
+            ChatScroller.ScrollToBottom();
+        }
+        catch (Exception ex)
+        {
+            AddStatus($"⚠ Failed to display image: {ex.Message}");
+            // Fallback: show placeholder
+            var border = new Border
+            {
+                Background = Panel,
+                BorderBrush = Border,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(8),
+                Margin = new Thickness(0, 4, 0, 0),
+            };
+            var text = new TextBlock
+            {
+                Text = $"🖼 Image unavailable: {imageUrl}",
+                Foreground = Muted,
+                FontStyle = FontStyles.Italic,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 4, 0, 0)
+            };
+            border.Child = text;
+            ChatPanel.Children.Add(border);
+        }
+    }
+    
+
 }

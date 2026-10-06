@@ -4,3 +4,23 @@ node_modules/
 **/obj/
 obj/
 */desktop/obj/
+**/debug/
+debug/
+# Node
+node_modules/
+
+# Environment / secrets
+.env
+
+# Logs
+*.log
+
+# .NET build output (matches at any depth)
+[Bb]in/
+[Oo]bj/
+desktop/[Bb]in/
+desktop/[Oo]bj/
+
+# Visual Studio / IDE
+.vs/
+*.user
