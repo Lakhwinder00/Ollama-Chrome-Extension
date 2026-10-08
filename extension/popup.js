@@ -327,13 +327,18 @@ function pageGetDom(args) {
     : document.querySelectorAll(
         'a, button, input, textarea, select, [role="button"], [onclick], h1, h2, h3, h4, p, li, td, img, [contenteditable="true"]'
       );
+  const rt = window.__agentRuntime;
+  for (const old of document.querySelectorAll('[data-agent-idx]')) old.removeAttribute('data-agent-idx');
   const elements = [];
   for (const el of Array.from(nodes)) {
     if (elements.length >= maxItems) break;
     const rect = el.getBoundingClientRect();
-    if (rect.width === 0 && rect.height === 0) continue;
+    if (rect.width === 0 || rect.height === 0) continue;
+    const index = elements.length + 1;
+    el.setAttribute('data-agent-idx', String(index));
     const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120);
-    elements.push({
+    const entry = {
+      index,
       tag: el.tagName.toLowerCase(),
       id: el.id || undefined,
       className: typeof el.className === 'string' ? el.className.slice(0, 80) : undefined,
@@ -342,26 +347,192 @@ function pageGetDom(args) {
       name: el.name || undefined,
       placeholder: el.placeholder || undefined,
       href: el.href || undefined,
-      value: el.value !== undefined ? String(el.value).slice(0, 60) : undefined,
-    });
+      value: el.value !== undefined && el.value !== '' ? String(el.value).slice(0, 60) : undefined,
+      editable: el.isContentEditable || undefined,
+      selector: rt ? rt.path(el) : undefined,
+      rect: { x: Math.round(rect.left), y: Math.round(rect.top), w: Math.round(rect.width), h: Math.round(rect.height) },
+    };
+    elements.push(entry);
   }
-  return { url: location.href, count: elements.length, elements };
+  return {
+    url: location.href,
+    title: document.title,
+    count: elements.length,
+    elements,
+    hint: 'Each element has a stable index — pass it as "index" to click/type/edit_element/delete_element.',
+  };
 }
 
-function pageClick(args) {
-  let el = null;
-  if (args.selector) {
-    el = document.querySelector(args.selector);
-  } else if (args.text) {
-    const needle = String(args.text).toLowerCase().trim();
-    const interactive = document.querySelectorAll(
-      'a, button, [role="button"], input[type="submit"], input[type="button"], label, summary, [onclick], [tabindex]'
-    );
-    for (const e of interactive) {
-      const t = ((e.innerText || e.textContent || e.value) || '').trim().toLowerCase();
-      if (t && t.includes(needle)) { el = e; break; }
-    }
-    if (!el) {
+function ensureAgentRuntime() {
+  if (window.__agentRuntime) return true;
+  const svg =
+    '<svg width="26" height="26" viewBox="0 0 24 24"><path d="M4 2 L20 12 L12 13 L9 21 Z" fill="#1f1f1f" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+  const rectOf = (t) =>
+    t && t.getBoundingClientRect ? t.getBoundingClientRect() : t || { left: 0, top: 0, width: 0, height: 0 };
+  window.__agentRuntime = {
+    wait(ms) {
+      return new Promise((r) => setTimeout(r, ms));
+    },
+    aim(target) {
+      try {
+        const p = document.createElement('div');
+        p.style.cssText =
+          'position:fixed;left:0;top:0;z-index:2147483648;pointer-events:none;transition:transform .55s cubic-bezier(.2,.8,.2,1);filter:drop-shadow(0 2px 5px rgba(0,0,0,.45));';
+        p.innerHTML = svg;
+        document.body.appendChild(p);
+        p.style.transform = 'translate(' + (window.innerWidth - 70) + 'px,' + (window.innerHeight - 70) + 'px)';
+        const r = rectOf(target);
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            p.style.transform =
+              'translate(' + (r.left + Math.max(4, r.width / 2)) + 'px,' + (r.top + Math.max(4, r.height / 2)) + 'px)';
+          })
+        );
+        setTimeout(() => p.remove(), 2600);
+      } catch (e) { /* pointer is best-effort */ }
+    },
+    highlight(el, color, ms) {
+      try {
+        const box = document.createElement('div');
+        box.style.cssText =
+          'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid ' +
+          (color || '#d97757') +
+          ';border-radius:4px;box-shadow:0 0 0 2px rgba(217,119,87,.3),0 0 14px rgba(217,119,87,.6);transition:all .12s ease;';
+        const place = () => {
+          const r = rectOf(el);
+          box.style.left = r.left + 'px';
+          box.style.top = r.top + 'px';
+          box.style.width = r.width + 'px';
+          box.style.height = r.height + 'px';
+        };
+        place();
+        document.body.appendChild(box);
+        const onScroll = () => place();
+        window.addEventListener('scroll', onScroll, { passive: true });
+        setTimeout(() => {
+          box.remove();
+          window.removeEventListener('scroll', onScroll);
+        }, ms || 2200);
+      } catch (e) { /* highlight is best-effort */ }
+    },
+    mouse(el) {
+      try {
+        if (el.focus) el.focus();
+      } catch (e) { /* focus is best-effort */ }
+      try {
+        const r = rectOf(el);
+        const base = {
+          bubbles: true,
+          cancelable: true,
+          view: window,
+          clientX: r.left + r.width / 2,
+          clientY: r.top + r.height / 2,
+          button: 0,
+        };
+        el.dispatchEvent(
+          new PointerEvent('pointerdown', Object.assign({}, base, { buttons: 1, pointerId: 1, isPrimary: true, pointerType: 'mouse' }))
+        );
+        el.dispatchEvent(new MouseEvent('mousedown', Object.assign({}, base, { buttons: 1 })));
+        el.dispatchEvent(
+          new PointerEvent('pointerup', Object.assign({}, base, { buttons: 0, pointerId: 1, isPrimary: true, pointerType: 'mouse' }))
+        );
+        el.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, base, { buttons: 0 })));
+        el.dispatchEvent(new MouseEvent('click', Object.assign({}, base, { buttons: 0 })));
+        return { clicked: true, clientX: Math.round(base.clientX), clientY: Math.round(base.clientY) };
+      } catch (e) {
+        try {
+          el.click();
+        } catch (e2) { /* ignore */ }
+        return { clicked: true };
+      }
+    },
+    type(el, value) {
+      const text = String(value);
+      const isSelect = typeof HTMLSelectElement !== 'undefined' && el instanceof HTMLSelectElement;
+      if (isSelect) {
+        el.value = text;
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { typed: text.length, select: true };
+      }
+      try {
+        el.focus();
+      } catch (e) { /* focus is best-effort */ }
+      if (el.isContentEditable) {
+        try {
+          document.execCommand('selectAll', false, null);
+        } catch (e) { /* selection is best-effort */ }
+        if (text.length > 1500) {
+          el.textContent = text;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          return { typed: text.length, bulk: true, contentEditable: true };
+        }
+        let ok = true;
+        try {
+          for (const ch of Array.from(text)) {
+            if (!document.execCommand('insertText', false, ch)) {
+              ok = false;
+              break;
+            }
+          }
+        } catch (e) {
+          ok = false;
+        }
+        if (ok) return { typed: text.length, contentEditable: true };
+        el.textContent = text;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        return { typed: text.length, contentEditable: true, fallback: true };
+      }
+      const proto =
+        typeof HTMLTextAreaElement !== 'undefined' && el instanceof HTMLTextAreaElement
+          ? HTMLTextAreaElement.prototype
+          : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+      if (text.length > 1500) {
+        setter.call(el, text);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { typed: text.length, bulk: true };
+      }
+      setter.call(el, '');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      let built = '';
+      for (const ch of Array.from(text)) {
+        built += ch;
+        const key = ch === '\n' ? 'Enter' : ch;
+        try {
+          el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+          el.dispatchEvent(new KeyboardEvent('keypress', { key, bubbles: true, cancelable: true }));
+        } catch (e) { /* older engines */ }
+        setter.call(el, built);
+        try {
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, data: ch, inputType: 'insertText' }));
+        } catch (e) {
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        try {
+          el.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true, cancelable: true }));
+        } catch (e) { /* older engines */ }
+      }
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { typed: text.length };
+    },
+    byIndex(i) {
+      if (i == null || i === '') return null;
+      return document.querySelector('[data-agent-idx="' + Number(i) + '"]');
+    },
+    byMatch(needle, opts) {
+      const n = String(needle || '').toLowerCase().trim();
+      if (!n) return null;
+      const o = opts || {};
+      if (!o.any) {
+        const interactive = document.querySelectorAll(
+          'a, button, [role="button"], input[type="submit"], input[type="button"], label, summary, [onclick], [tabindex]'
+        );
+        for (const e of interactive) {
+          const t = ((e.innerText || e.textContent || e.value) || '').trim().toLowerCase();
+          if (t && t.includes(n)) return e;
+        }
+      }
       let best = null;
       let bestLen = Infinity;
       for (const e of document.querySelectorAll('body *')) {
@@ -369,87 +540,98 @@ function pageClick(args) {
         if (rect.width === 0 || rect.height === 0) continue;
         const t = ((e.innerText || e.textContent) || '').trim();
         if (!t || t.length > 300) continue;
-        if (t.toLowerCase().includes(needle) && t.length < bestLen) {
+        if (t.toLowerCase().includes(n) && t.length < bestLen) {
           best = e;
           bestLen = t.length;
         }
       }
-      el = best;
-    }
-  }
-  if (!el) throw new Error('No element matched: ' + JSON.stringify(args));
-  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  try {
-    const box = document.createElement('div');
-    box.style.cssText =
-      'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #d97757;border-radius:4px;box-shadow:0 0 0 2px rgba(217,119,87,.35),0 0 14px rgba(217,119,87,.7);transition:all .12s ease;';
-    const place = () => {
-      const r = el.getBoundingClientRect();
-      box.style.left = r.left + 'px';
-      box.style.top = r.top + 'px';
-      box.style.width = r.width + 'px';
-      box.style.height = r.height + 'px';
-    };
-    place();
-    document.body.appendChild(box);
-    const onScroll = () => place();
-    window.addEventListener('scroll', onScroll, { passive: true });
-    setTimeout(() => { box.remove(); window.removeEventListener('scroll', onScroll); }, 1500);
-  } catch (e) { /* highlight is best-effort */ }
-  el.click();
-  return {
-    clicked: true,
-    tag: el.tagName.toLowerCase(),
-    text: ((el.innerText || el.textContent) || '').trim().slice(0, 120),
+      return best;
+    },
+    path(el) {
+      if (!el || el.nodeType !== 1) return '';
+      const esc = (s) => (window.CSS && CSS.escape ? CSS.escape(s) : s);
+      if (el.id) return '#' + esc(el.id);
+      const parts = [];
+      let node = el;
+      while (node && node.nodeType === 1 && node !== document.body && parts.length < 6) {
+        if (node.id) {
+          parts.unshift('#' + esc(node.id));
+          break;
+        }
+        let seg = node.tagName.toLowerCase();
+        const parent = node.parentElement;
+        if (parent) {
+          const same = Array.prototype.filter.call(parent.children, (c) => c.tagName === node.tagName);
+          if (same.length > 1) seg += ':nth-of-type(' + (same.indexOf(node) + 1) + ')';
+        }
+        parts.unshift(seg);
+        node = parent;
+      }
+      return parts.join(' > ');
+    },
   };
+  return true;
+}
+
+function pageClick(args) {
+  const a = args || {};
+  const rt = window.__agentRuntime;
+  if (!rt) throw new Error('Agent runtime not loaded — reload the extension at chrome://extensions.');
+  let el = rt.byIndex(a.index);
+  if (a.index != null && a.index !== '' && !el) {
+    throw new Error('Element #' + a.index + ' is stale — call get_dom again to refresh element numbers.');
+  }
+  if (!el && a.selector) el = document.querySelector(a.selector);
+  if (!el && a.text) el = rt.byMatch(a.text);
+  if (!el) throw new Error('No element matched: ' + JSON.stringify(a));
+  el.scrollIntoView({ block: 'center', behavior: 'auto' });
+  rt.aim(el);
+  return rt.wait(550).then(() => {
+    rt.highlight(el, '#d97757', 1800);
+    const res = rt.mouse(el);
+    const out = {
+      clicked: true,
+      tag: el.tagName.toLowerCase(),
+      text: ((el.innerText || el.textContent) || '').trim().slice(0, 120),
+    };
+    if (res && res.clientX != null) out.at = { x: res.clientX, y: res.clientY };
+    if (a.index != null && a.index !== '') out.index = Number(a.index);
+    return out;
+  });
 }
 
 function pageType(args) {
-  let el = null;
-  if (args.selector) {
-    el = document.querySelector(args.selector);
-  } else {
-    const needle = String(args.text || '').toLowerCase();
-    const fields = document.querySelectorAll('input, textarea, select');
+  const a = args || {};
+  const rt = window.__agentRuntime;
+  if (!rt) throw new Error('Agent runtime not loaded — reload the extension at chrome://extensions.');
+  let el = rt.byIndex(a.index);
+  if (a.index != null && a.index !== '' && !el) {
+    throw new Error('Element #' + a.index + ' is stale — call get_dom again to refresh element numbers.');
+  }
+  if (!el && a.selector) el = document.querySelector(a.selector);
+  if (!el && !a.selector && !a.index) {
+    const needle = String(a.text || '').toLowerCase();
+    const fields = document.querySelectorAll('input, textarea, select, [contenteditable="true"]');
     for (const f of fields) {
       const p = (f.placeholder || '').toLowerCase();
       const n = (f.name || '').toLowerCase();
-      const a = (f.getAttribute('aria-label') || '').toLowerCase();
-      if (needle && (p.includes(needle) || n.includes(needle) || a.includes(needle))) { el = f; break; }
+      const lbl = (f.getAttribute('aria-label') || '').toLowerCase();
+      if (needle && (p.includes(needle) || n.includes(needle) || lbl.includes(needle))) { el = f; break; }
     }
   }
-  if (!el) throw new Error('No input matched: ' + JSON.stringify(args));
-  el.focus();
-  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  try {
-    const box = document.createElement('div');
-    box.style.cssText =
-      'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #d97757;border-radius:4px;box-shadow:0 0 0 2px rgba(217,119,87,.35),0 0 14px rgba(217,119,87,.7);transition:all .12s ease;';
-    const place = () => {
-      const r = el.getBoundingClientRect();
-      box.style.left = r.left + 'px';
-      box.style.top = r.top + 'px';
-      box.style.width = r.width + 'px';
-      box.style.height = r.height + 'px';
+  if (!el) throw new Error('No input matched: ' + JSON.stringify(a));
+  el.scrollIntoView({ block: 'center', behavior: 'auto' });
+  rt.aim(el);
+  return rt.wait(550).then(() => {
+    rt.highlight(el, '#d97757', 2400);
+    const r = rt.type(el, a.value);
+    return {
+      typed: true,
+      into: a.selector || a.text || (a.index != null && a.index !== '' ? '#' + a.index : ''),
+      value: String(a.value),
+      chars: r && r.typed,
     };
-    place();
-    document.body.appendChild(box);
-    const onScroll = () => place();
-    window.addEventListener('scroll', onScroll, { passive: true });
-    setTimeout(() => { box.remove(); window.removeEventListener('scroll', onScroll); }, 1500);
-  } catch (e) { /* highlight is best-effort */ }
-  const value = String(args.value);
-  if (el instanceof HTMLSelectElement) {
-    el.value = value;
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    return { typed: true, into: args.selector || args.text, value };
-  }
-  const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-  const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
-  setter.call(el, value);
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-  el.dispatchEvent(new Event('change', { bubbles: true }));
-  return { typed: true, into: args.selector || args.text, value };
+  });
 }
 
 function pageScroll(args) {
@@ -558,25 +740,11 @@ function pageFindBestLink(args) {
     return b.text.length - a.text.length;
   });
   const best = candidates[0];
-  highlightElement(best.el, 'rgba(40,167,67,.4)');
-  best.el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  try {
-    const box = document.createElement('div');
-    box.style.cssText =
-      'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #28a745;border-radius:4px;box-shadow:0 0 0 2px rgba(40,167,67,.35),0 0 14px rgba(40,167,67,.7);transition:all .12s ease;';
-    const place = () => {
-      const r = best.el.getBoundingClientRect();
-      box.style.left = r.left + 'px';
-      box.style.top = r.top + 'px';
-      box.style.width = r.width + 'px';
-      box.style.height = r.height + 'px';
-    };
-    place();
-    document.body.appendChild(box);
-    const onScroll = () => place();
-    window.addEventListener('scroll', onScroll, { passive: true });
-    setTimeout(() => { box.remove(); window.removeEventListener('scroll', onScroll); }, 1500);
-  } catch (e) { /* highlight is best-effort */ }
+  best.el.scrollIntoView({ block: 'center', behavior: 'auto' });
+  if (window.__agentRuntime) {
+    window.__agentRuntime.aim(best.el);
+    window.__agentRuntime.highlight(best.el, '#28a745', 1800);
+  }
   best.el.click();
   return {
     clicked: true,
@@ -732,25 +900,15 @@ function pageSearchOnPage(args) {
 
 function pageEditElement(args) {
   const a = args || {};
-  let el = null;
-  if (a.selector) el = document.querySelector(a.selector);
-  if (!el && a.match) {
-    const needle = String(a.match).toLowerCase().trim();
-    let best = null;
-    let bestLen = Infinity;
-    for (const e of document.querySelectorAll('body *')) {
-      const rect = e.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) continue;
-      const t = ((e.innerText || e.textContent) || '').trim();
-      if (!t || t.length > 300) continue;
-      if (t.toLowerCase().includes(needle) && t.length < bestLen) {
-        best = e;
-        bestLen = t.length;
-      }
-    }
-    el = best;
+  const rt = window.__agentRuntime;
+  if (!rt) throw new Error('Agent runtime not loaded — reload the extension at chrome://extensions.');
+  let el = rt.byIndex(a.index);
+  if (a.index != null && a.index !== '' && !el) {
+    throw new Error('Element #' + a.index + ' is stale — call get_dom again to refresh element numbers.');
   }
-  if (!el) throw new Error('edit_element: no element matched ' + JSON.stringify({ selector: a.selector, match: a.match }));
+  if (!el && a.selector) el = document.querySelector(a.selector);
+  if (!el && a.match) el = rt.byMatch(a.match, { any: true });
+  if (!el) throw new Error('edit_element: no element matched ' + JSON.stringify({ index: a.index, selector: a.selector, match: a.match }));
   const isField =
     el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement;
   let mode;
@@ -762,53 +920,30 @@ function pageEditElement(args) {
   else if (a.attribute !== undefined) mode = 'attribute';
   else throw new Error('edit_element requires one of: text, html, value, or attribute.');
   const before = ((el.innerText || el.textContent || el.value) || '').trim().slice(0, 200);
-  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  if (mode === 'value') {
-    if (el instanceof HTMLSelectElement) {
-      el.value = String(a.value !== undefined ? a.value : a.text);
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+  el.scrollIntoView({ block: 'center', behavior: 'auto' });
+  rt.aim(el);
+  return rt.wait(550).then(() => {
+    if (mode === 'value') {
+      rt.type(el, a.value !== undefined ? a.value : a.text);
+    } else if (mode === 'text') {
+      el.textContent = String(a.text !== undefined ? a.text : a.value);
+    } else if (mode === 'html') {
+      el.innerHTML = String(a.html);
     } else {
-      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, String(a.value !== undefined ? a.value : a.text));
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.setAttribute(String(a.attribute), String(a.attribute_value !== undefined ? a.attribute_value : ''));
     }
-  } else if (mode === 'text') {
-    el.textContent = String(a.text !== undefined ? a.text : a.value);
-  } else if (mode === 'html') {
-    el.innerHTML = String(a.html);
-  } else {
-    el.setAttribute(String(a.attribute), String(a.attribute_value !== undefined ? a.attribute_value : ''));
-  }
-  try {
-    const box = document.createElement('div');
-    box.style.cssText =
-      'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #d97757;border-radius:4px;box-shadow:0 0 0 2px rgba(217,119,87,.35),0 0 14px rgba(217,119,87,.7);transition:all .12s ease;';
-    const place = () => {
-      const r = el.getBoundingClientRect();
-      box.style.left = r.left + 'px';
-      box.style.top = r.top + 'px';
-      box.style.width = r.width + 'px';
-      box.style.height = r.height + 'px';
+    rt.highlight(el, '#d97757', 2400);
+    const after = ((el.innerText || el.textContent || el.value) || '').trim().slice(0, 200);
+    return {
+      updated: true,
+      mode,
+      tag: el.tagName.toLowerCase(),
+      before,
+      after,
+      index: a.index != null && a.index !== '' ? Number(a.index) : undefined,
+      attribute: mode === 'attribute' ? String(a.attribute) : undefined,
     };
-    place();
-    document.body.appendChild(box);
-    const onScroll = () => place();
-    window.addEventListener('scroll', onScroll, { passive: true });
-    setTimeout(() => {
-      box.remove();
-      window.removeEventListener('scroll', onScroll);
-    }, 2500);
-  } catch (e) { /* highlight is best-effort */ }
-  const after = ((el.innerText || el.textContent || el.value) || '').trim().slice(0, 200);
-  return {
-    updated: true,
-    mode,
-    tag: el.tagName.toLowerCase(),
-    before,
-    after,
-    attribute: mode === 'attribute' ? String(a.attribute) : undefined,
-  };
+  });
 }
 
 function pageAddElement(args) {
@@ -822,7 +957,12 @@ function pageAddElement(args) {
   }
   if (!html.trim()) throw new Error('add_element requires html or text.');
   const position = ['append', 'prepend', 'before', 'after'].includes(a.position) ? a.position : 'append';
-  let anchor = a.selector ? document.querySelector(a.selector) : null;
+  const rt = window.__agentRuntime;
+  let anchor = rt ? rt.byIndex(a.index) : null;
+  if (a.index != null && a.index !== '' && !anchor) {
+    throw new Error('Element #' + a.index + ' is stale — call get_dom again to refresh element numbers.');
+  }
+  if (!anchor && a.selector) anchor = document.querySelector(a.selector);
   if (!anchor) {
     if (a.selector) throw new Error('add_element: no element matched selector ' + JSON.stringify(a.selector));
     anchor = document.body;
@@ -839,28 +979,16 @@ function pageAddElement(args) {
   else if (target === 'before') anchor.parentNode.insertBefore(fragment, anchor);
   else if (target === 'after') anchor.parentNode.insertBefore(fragment, anchor.nextSibling);
   else anchor.appendChild(fragment);
-  if (firstEl) {
+  if (firstEl && rt) {
+    try {
+      firstEl.scrollIntoView({ block: 'center', behavior: 'auto' });
+    } catch (e) { /* scroll is best-effort */ }
+    rt.aim(firstEl);
+    rt.highlight(firstEl, '#28a745', 2600);
+  } else if (firstEl) {
     try {
       firstEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      const box = document.createElement('div');
-      box.style.cssText =
-        'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #28a745;border-radius:4px;box-shadow:0 0 0 2px rgba(40,167,67,.35),0 0 14px rgba(40,167,67,.7);transition:all .12s ease;';
-      const place = () => {
-        const r = firstEl.getBoundingClientRect();
-        box.style.left = r.left + 'px';
-        box.style.top = r.top + 'px';
-        box.style.width = r.width + 'px';
-        box.style.height = r.height + 'px';
-      };
-      place();
-      document.body.appendChild(box);
-      const onScroll = () => place();
-      window.addEventListener('scroll', onScroll, { passive: true });
-      setTimeout(() => {
-        box.remove();
-        window.removeEventListener('scroll', onScroll);
-      }, 2500);
-    } catch (e) { /* highlight is best-effort */ }
+    } catch (e) { /* scroll is best-effort */ }
   }
   return {
     added: true,
@@ -874,41 +1002,36 @@ function pageAddElement(args) {
 
 function pageDeleteElement(args) {
   const a = args || {};
-  let el = null;
-  if (a.selector) el = document.querySelector(a.selector);
-  if (!el && a.match) {
-    const needle = String(a.match).toLowerCase().trim();
-    let best = null;
-    let bestLen = Infinity;
-    for (const e of document.querySelectorAll('body *')) {
-      const rect = e.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) continue;
-      const t = ((e.innerText || e.textContent) || '').trim();
-      if (!t || t.length > 300) continue;
-      if (t.toLowerCase().includes(needle) && t.length < bestLen) {
-        best = e;
-        bestLen = t.length;
-      }
-    }
-    el = best;
+  const rt = window.__agentRuntime;
+  if (!rt) throw new Error('Agent runtime not loaded — reload the extension at chrome://extensions.');
+  let el = rt.byIndex(a.index);
+  if (a.index != null && a.index !== '' && !el) {
+    throw new Error('Element #' + a.index + ' is stale — call get_dom again to refresh element numbers.');
   }
-  if (!el) throw new Error('delete_element: no element matched ' + JSON.stringify({ selector: a.selector, match: a.match }));
+  if (!el && a.selector) el = document.querySelector(a.selector);
+  if (!el && a.match) el = rt.byMatch(a.match, { any: true });
+  if (!el) throw new Error('delete_element: no element matched ' + JSON.stringify({ index: a.index, selector: a.selector, match: a.match }));
   const info = {
     deleted: true,
     tag: el.tagName.toLowerCase(),
     text: ((el.innerText || el.textContent) || '').trim().slice(0, 120),
+    index: a.index != null && a.index !== '' ? Number(a.index) : undefined,
   };
-  try {
-    const r = el.getBoundingClientRect();
-    const box = document.createElement('div');
-    box.style.cssText =
-      'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #dc3545;border-radius:4px;box-shadow:0 0 0 2px rgba(220,53,69,.35),0 0 14px rgba(220,53,69,.7);left:' +
-      r.left + 'px;top:' + r.top + 'px;width:' + r.width + 'px;height:' + r.height + 'px;';
-    document.body.appendChild(box);
-    setTimeout(() => box.remove(), 1500);
-  } catch (e) { /* highlight is best-effort */ }
-  el.remove();
-  return info;
+  el.scrollIntoView({ block: 'center', behavior: 'auto' });
+  rt.aim(el);
+  return rt.wait(550).then(() => {
+    try {
+      const r = el.getBoundingClientRect();
+      const box = document.createElement('div');
+      box.style.cssText =
+        'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #dc3545;border-radius:4px;box-shadow:0 0 0 2px rgba(220,53,69,.35),0 0 14px rgba(220,53,69,.7);left:' +
+        r.left + 'px;top:' + r.top + 'px;width:' + r.width + 'px;height:' + r.height + 'px;';
+      document.body.appendChild(box);
+      setTimeout(() => box.remove(), 1500);
+    } catch (e) { /* highlight is best-effort */ }
+    el.remove();
+    return info;
+  });
 }
 
 const BROWSER_EXECUTORS = {
@@ -971,7 +1094,7 @@ async function captureScreenshot() {
   canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
   const out = canvas.toDataURL('image/jpeg', 0.7);
   appendScreenshot(out);
-  return { captured: true, width: canvas.width, height: canvas.height };
+  return { captured: true, width: canvas.width, height: canvas.height, image: out };
 }
 
 function normalizeUrl(rawUrl) {
@@ -1089,6 +1212,10 @@ async function executeBrowserTool(name, args) {
   }
   let results;
   try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: ensureAgentRuntime,
+    });
     results = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: fn,

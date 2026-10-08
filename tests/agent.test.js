@@ -15,6 +15,8 @@ const {
   buildSystemPrompt,
   shouldRunWebResearch,
   looksLikeManualInstructions,
+  splitImage,
+  imageToBase64,
   runAgent,
 } = require('../agent/agent');
 const { webSearch } = require('../agent/web');
@@ -220,4 +222,97 @@ test('the browser nudge gives up after two attempts', async () => {
   });
   assert.equal(calls, 3, 'one attempt plus at most two nudges');
   assert.match(result.content, /do this yourself/);
+});
+
+test('splitImage separates the screenshot from the tool result', () => {
+  const r = splitImage({ captured: true, width: 900, image: 'data:image/jpeg;base64,QUJD' });
+  assert.deepEqual(r.rest, { captured: true, width: 900 });
+  assert.equal(r.image, 'data:image/jpeg;base64,QUJD');
+  assert.equal(imageToBase64('data:image/jpeg;base64,QUJD'), 'QUJD');
+  assert.deepEqual(splitImage({ error: 'x' }), { rest: { error: 'x' }, image: null });
+  assert.deepEqual(splitImage('plain string'), { rest: 'plain string', image: null });
+});
+
+test('screenshot images go back to vision models and are stripped for text-only ones', async () => {
+  const makeProvider = () => {
+    let calls = 0;
+    return {
+      name: 'mock',
+      chatStream: async () => {
+        calls++;
+        if (calls === 1) {
+          return {
+            message: { content: '', tool_calls: [{ function: { name: 'screenshot', arguments: '{}' } }] },
+            streamedContent: false,
+          };
+        }
+        return { message: { content: 'Verified the page visually.' }, streamedContent: false };
+      },
+    };
+  };
+  const requestBrowser = async () => ({ captured: true, width: 900, height: 500, image: 'data:image/jpeg;base64,QUJD' });
+
+  const visionRun = await runAgent({
+    model: 'mock',
+    messages: [{ role: 'user', content: 'check the page' }],
+    provider: makeProvider(),
+    requestBrowser,
+    vision: true,
+  });
+  const visionTool = visionRun.history.find((m) => m.role === 'tool');
+  assert.deepEqual(visionTool.images, ['QUJD']);
+  assert.ok(!visionTool.content.includes('base64,'), 'history must not contain the raw data URL');
+  assert.match(visionRun.content, /Verified/);
+
+  const blindRun = await runAgent({
+    model: 'mock',
+    messages: [{ role: 'user', content: 'check the page' }],
+    provider: makeProvider(),
+    requestBrowser,
+    vision: false,
+  });
+  const blindTool = blindRun.history.find((m) => m.role === 'tool');
+  assert.equal(blindTool.images, undefined);
+  assert.match(blindTool.content, /shown to the user/);
+  assert.ok(!blindTool.content.includes('base64,'), 'history must not contain the raw data URL');
+});
+
+test('a model that keeps searching is forced to answer from what it gathered', async () => {
+  let calls = 0;
+  const provider = {
+    name: 'mock',
+    chatStream: async () => {
+      calls++;
+      if (calls <= 5) {
+        return {
+          message: {
+            content: '',
+            tool_calls: [{ function: { name: 'search', arguments: JSON.stringify({ query: 'local llm ' + calls }) } }],
+          },
+          streamedContent: false,
+        };
+      }
+      return {
+        message: {
+          content: 'Best local LLMs: llama.cpp and Ollama both run on CPU. Sources: https://example.com/local-llm',
+        },
+        streamedContent: false,
+      };
+    },
+  };
+  const events = [];
+  const result = await runAgent({
+    model: 'mock',
+    messages: [{ role: 'user', content: 'what is the best local LLM?' }],
+    provider,
+    requestBrowser: async () => ({ navigatedTo: 'https://www.google.com/search?q=local+llm' }),
+    onEvent: (e) => events.push(e),
+  });
+  assert.equal(calls, 6, 'five searches, then one forced synthesis call');
+  assert.match(result.content, /llama\.cpp/);
+  assert.ok(events.some((e) => e.type === 'status' && /final answer/i.test(e.message || '')));
+  assert.ok(
+    !events.some((e) => e.type === 'status' && /maximum steps/i.test(e.message || '')),
+    'the user must never see "maximum steps reached" after successful synthesis'
+  );
 });

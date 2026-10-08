@@ -180,6 +180,7 @@ async function handleChat(req, res) {
 
   const caps = await getCapabilities();
   const think = !!(caps[session.model] && caps[session.model].has('thinking'));
+  const vision = !!(caps[session.model] && caps[session.model].has('vision'));
 
   const ac = new AbortController();
   activeRuns.set(session.id, ac);
@@ -192,6 +193,7 @@ async function handleChat(req, res) {
       tools: TOOL_DEFINITIONS,
       autoApprove: !!body.autoApprove,
       think,
+      vision,
       planFirst: !think,
       requestApproval: requestApprovalFactory(emit, session),
       requestBrowser: requestBrowserFactory(emit),

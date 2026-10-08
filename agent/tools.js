@@ -674,7 +674,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'get_dom',
       description:
-        'List elements on the active tab (links, buttons, fields, headings, paragraphs, list items, images) so you can find what to click, edit, or read.',
+        'List elements on the active tab (links, buttons, fields, headings, paragraphs, list items, images) as a numbered snapshot. Every element has a stable `index` and a generated CSS `selector` — pass the index to click/type/edit_element/delete_element for the most reliable targeting.',
       parameters: {
         type: 'object',
         properties: {
@@ -689,10 +689,11 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'click',
       description:
-        'Click anywhere on the active browser tab — found by CSS selector or by matching visible text (links, buttons, tabs, menus, or any other element on the page).',
+        'Click anywhere on the active browser tab. Prefer `index` from the latest get_dom snapshot (most reliable); selector and visible-text matching are fallbacks. Works on links, buttons, tabs, menus, or any other element.',
       parameters: {
         type: 'object',
         properties: {
+          index: { type: 'integer', description: 'Element number from the latest get_dom snapshot (preferred).' },
           selector: { type: 'string', description: 'CSS selector of the element, e.g. "#submit" or "button.login".' },
           text: { type: 'string', description: 'Visible text of the element to click (case-insensitive substring match).' },
         },
@@ -704,10 +705,11 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'type',
       description:
-        'Type text into an input, textarea, or select on the active browser tab, found by CSS selector or by placeholder/name/aria-label text.',
+        'Type text into an input, textarea, select, or content-editable field on the active tab, exactly like a user: characters are entered one by one with key events. Prefer `index` from the latest get_dom snapshot.',
       parameters: {
         type: 'object',
         properties: {
+          index: { type: 'integer', description: 'Element number from the latest get_dom snapshot (preferred).' },
           selector: { type: 'string', description: 'CSS selector of the field, e.g. "#email".' },
           text: { type: 'string', description: 'Placeholder, name, or aria-label of the field to find.' },
           value: { type: 'string', description: 'The text to type into the field.' },
@@ -721,10 +723,11 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'edit_element',
       description:
-        'Update an existing element on the active page: change its text, inner HTML, form value, or an attribute. The change is applied immediately and the user sees it live in their tab (a refresh restores the original). Decide on your own when the page content needs changing — no approval needed.',
+        'Update an existing element on the active page: change its text, inner HTML, form value, or an attribute. The change is applied immediately and the user sees it live in their tab (a refresh restores the original). Prefer `index` from the latest get_dom snapshot. Decide on your own when the page content needs changing — no approval needed.',
       parameters: {
         type: 'object',
         properties: {
+          index: { type: 'integer', description: 'Element number from the latest get_dom snapshot (preferred).' },
           selector: { type: 'string', description: 'CSS selector of the element, e.g. "h1" or "#price".' },
           match: { type: 'string', description: 'Visible text to locate the element instead of a selector (smallest matching element wins).' },
           text: { type: 'string', description: 'New plain-text content for the element.' },
@@ -748,6 +751,7 @@ const TOOL_DEFINITIONS = [
           html: { type: 'string', description: 'HTML to insert, e.g. "<p class=\'note\'>Found 3 matches</p>".' },
           text: { type: 'string', description: 'Plain text to insert (HTML-escaped) if you do not want markup.' },
           selector: { type: 'string', description: 'Target element CSS selector (default: body).' },
+          index: { type: 'integer', description: 'Target element number from the latest get_dom snapshot (preferred over selector).' },
           position: { type: 'string', enum: ['append', 'prepend', 'before', 'after'], description: 'Where to insert relative to the target (default append).' },
         },
       },
@@ -758,10 +762,11 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'delete_element',
       description:
-        'Remove an element from the active page. The user sees it disappear live; a refresh restores it. Decide on your own when something on the page should go (noise, popups, banners).',
+        'Remove an element from the active page. The user sees it disappear live; a refresh restores it. Prefer `index` from the latest get_dom snapshot. Decide on your own when something on the page should go (noise, popups, banners).',
       parameters: {
         type: 'object',
         properties: {
+          index: { type: 'integer', description: 'Element number from the latest get_dom snapshot (preferred).' },
           selector: { type: 'string', description: 'CSS selector of the element to remove.' },
           match: { type: 'string', description: 'Visible text to locate the element instead of a selector.' },
         },
@@ -789,7 +794,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'screenshot',
       description:
-        'Capture a screenshot of the currently active browser tab. Use this to verify what the page looks like after clicking, typing, or editing it.',
+        'Capture a screenshot of the active browser tab. With a vision-capable model the image is returned to you so you can see the page and verify your work visually after clicking, typing, or editing.',
       parameters: {
         type: 'object',
         properties: {},

@@ -19,6 +19,7 @@ const DANGEROUS_TOOLS = new Set([
 ]);
 const MAX_ITERATIONS = 15;
 const MAX_HISTORY = 80;
+const MAX_RESEARCH_CALLS = 5;
 
 const PLAN_PROMPT =
   "Before using any tools, think step by step about the user's request: what you need to inspect, what you plan to change, and why. Describe your plan briefly, then stop. Do not call any tools yet.";
@@ -55,14 +56,14 @@ function buildSystemPrompt() {
     '',
     "Browser tools (operate on the user's active Chrome tab):",
     "- get_page(max_chars?, max_scrolls?) — read the tab's URL, title, and full page text (auto-scrolls).",
-    '- get_dom(selector?, max_items?) — list page elements (links, buttons, fields, headings, text) on the page.',
-    '- click(selector? or text?) — click any element on the page.',
-    '- type(selector? or text?, value) — type into a field on the page.',
-    '- edit_element(selector? or match?, text?/html?/value?/attribute?, attribute_value?) — update an existing element on the page.',
-    '- add_element(html? or text?, selector?, position?) — add new content to the page.',
-    '- delete_element(selector? or match?) — remove an element from the page.',
+    '- get_dom(selector?, max_items?) — snapshot the page as a numbered element list (index, tag, text, selector). Re-run it whenever an index looks stale.',
+    '- click(index? or selector? or text?) — click any element on the page. index (from get_dom) is the most reliable.',
+    '- type(index? or selector? or text?, value) — type into a field on the page, character by character as a user would.',
+    '- edit_element(index? or selector? or match?, text?/html?/value?/attribute?, attribute_value?) — update an existing element on the page.',
+    '- add_element(html? or text?, selector?, index?, position?) — add new content to the page.',
+    '- delete_element(index? or selector? or match?) — remove an element from the page.',
     '- scroll(direction?, amount?, selector?) — scroll the page or an element into view.',
-    '- screenshot — capture the active tab as an image to verify the result.',
+    '- screenshot — capture the active tab. With a vision-capable model the image is sent back to you so you can see the page like the user does.',
     '- navigate(url) — open a URL in the active tab.',
     '- search(query) — search Google and open the results.',
     '',
@@ -77,9 +78,9 @@ function buildSystemPrompt() {
     '',
     'Browser task method (act on the active tab / a website, step by step like Claude):',
     '1. Understand the page first. If the message contains an "[Active browser tab ...]" block, use it; otherwise call get_page or get_dom.',
-    '2. Before acting, write a short numbered plan: "Step 1: ...", "Step 2: ...", each naming the exact tool and target (selector/text/url).',
+    '2. Before acting, write a short numbered plan: "Step 1: ...", "Step 2: ...", each naming the exact tool and target (index from get_dom, selector, text, or url).',
     '3. Execute the plan one step at a time using the browser tools (click, type, navigate, scroll, search, edit_element, add_element, delete_element).',
-    '4. After each click/type/navigate/edit, take a screenshot to verify. If it did not work, re-read the page (get_dom), revise the plan, and continue - never repeat the same failing action.',
+    '4. After each click/type/navigate/edit, take a screenshot to verify (you will see it if your model supports vision) or re-read with get_dom. If an element index went stale, re-run get_dom. Never repeat the same failing action.',
     '5. When the goal is done, stop and briefly summarize the steps performed and the result.',
     '',
     'Rules:',
@@ -102,6 +103,7 @@ function buildSystemPrompt() {
     '4. Cross-check facts across sources and note disagreements.',
     '5. Prefer the most recent primary source when they conflict.',
     '6. Answer with citations (title + URL) and a confidence note. Never claim 100% certainty.',
+    '7. Never search in a loop: after 4-5 searches stop and answer from the results you already have, noting anything missing.',
   ].join('\n') + loadProjectRules(root);
 }
 
@@ -207,6 +209,64 @@ function looksLikeManualInstructions(content) {
   const browserish =
     /(click|type|edit|updat|add|remov|scroll|open|navigat|search|profile|page|section|button|field|form|headline|about|skill)/i.test(text);
   return tellsUser && hasSteps && browserish;
+}
+
+/** Splits a base64 screenshot out of a tool result so it never bloats history. */
+function splitImage(result) {
+  if (result && typeof result === 'object' && typeof result.image === 'string' && result.image.startsWith('data:')) {
+    const rest = Object.assign({}, result);
+    const image = rest.image;
+    delete rest.image;
+    return { rest, image };
+  }
+  return { rest: result, image: null };
+}
+
+/** data-URL -> raw base64 (what Ollama's message.images expects). */
+function imageToBase64(dataUrl) {
+  const s = String(dataUrl || '');
+  const i = s.indexOf('base64,');
+  return i === -1 ? s : s.slice(i + 7);
+}
+
+/**
+ * Last-resort answer: after the model has searched/read enough (or burned all
+ * its steps), ask it once — without tools — to answer from what it gathered,
+ * so the user never ends up with "maximum steps reached" and nothing else.
+ */
+async function synthesizeFinalAnswer({ history, provider, model, signal, onEvent = () => {} }) {
+  onEvent({ type: 'status', message: 'Enough information gathered — writing the final answer…' });
+  let streamed = '';
+  let res;
+  try {
+    res = await provider.chatStream({
+      model,
+      messages: [
+        ...history,
+        {
+          role: 'user',
+          content:
+            'You have gathered enough information. Give the final answer NOW using only the tool results already in this conversation. Do NOT call any tools. Start with the direct answer, cite the sources (title + URL) from the search results, and end with a short confidence note.',
+        },
+      ],
+      think: false,
+      signal,
+      onDelta: (d) => {
+        if (d.type === 'thinking') onEvent({ type: 'thinking', content: d.content });
+        else if (d.type === 'assistant') {
+          streamed += d.content;
+          onEvent({ type: 'assistant', content: d.content });
+        }
+      },
+    });
+  } catch (e) {
+    if (signal && signal.aborted) return null;
+    return null;
+  }
+  const text = (streamed || (res && res.message && res.message.content) || '').trim();
+  if (!text || /^\s*[{[]/.test(text)) return null;
+  if (!streamed) onEvent({ type: 'assistant', content: text });
+  return text;
 }
 
 async function runWebResearchFallback(messages, onEvent = () => {}) {
@@ -362,6 +422,7 @@ async function runAgent({
   autoApprove = false,
   think = false,
   planFirst = false,
+  vision = false,
   requestApproval,
   requestBrowser,
   signal,
@@ -372,6 +433,7 @@ async function runAgent({
   const history = ensureSystemMessage(messages);
   const recentCalls = [];
   let browserNudges = 0;
+  let researchCalls = 0;
   // Tool names already approved for this run (session scope or always-allow).
   const sessionAllowed = new Set(Array.isArray(preApproved) ? preApproved : []);
 
@@ -473,6 +535,7 @@ async function runAgent({
       const name = fn.name;
       const args = fn.arguments || {};
       onEvent({ type: 'tool', name, arguments: args });
+      if (name === 'web_search' || name === 'search') researchCalls++;
 
       // Guard against the model looping on the same action.
       const callKey = name + ':' + JSON.stringify(args);
@@ -507,27 +570,52 @@ async function runAgent({
       }
 
       let result;
+      let image = null;
       try {
         if (BROWSER_TOOLS.has(name)) {
           if (typeof requestBrowser !== 'function') {
             throw new Error(`Browser tool "${name}" needs the Chrome extension popup to be open.`);
           }
           result = await requestBrowser(name, args);
-          onEvent({ type: 'tool_result', name, ok: true, summary: summarizeResult(result), detail: resultDetail(result) });
         } else {
           result = await execute(name, args);
-          onEvent({ type: 'tool_result', name, ok: true, summary: summarizeResult(result), detail: resultDetail(result) });
         }
+        const parts = splitImage(result);
+        result = parts.rest;
+        image = parts.image;
+        onEvent({ type: 'tool_result', name, ok: true, summary: summarizeResult(result), detail: resultDetail(result) });
       } catch (e) {
         result = { error: String((e && e.message) || e) };
         onEvent({ type: 'tool_result', name, ok: false, error: result.error });
       }
-      history.push({ role: 'tool', content: historyResult(result) });
+      const toolMessage = { role: 'tool', content: historyResult(result) };
+      if (image) {
+        if (vision) {
+          toolMessage.images = [imageToBase64(image)];
+        } else {
+          toolMessage.content +=
+            '\n(Screenshot captured and shown to the user in the panel. Your model has no vision support — verify with get_page/get_dom text instead.)';
+        }
+      }
+      history.push(toolMessage);
+    }
+
+    if (researchCalls >= MAX_RESEARCH_CALLS) {
+      const answer = await synthesizeFinalAnswer({ history, provider, model, signal, onEvent });
+      if (answer) {
+        history.push({ role: 'assistant', content: answer });
+        return { content: answer, history };
+      }
     }
   }
 
   const final =
     'I reached the maximum number of steps without finishing. Please ask me to continue or narrow the task.';
+  const synthesized = await synthesizeFinalAnswer({ history, provider, model, signal, onEvent });
+  if (synthesized) {
+    history.push({ role: 'assistant', content: synthesized });
+    return { content: synthesized, history };
+  }
   if (shouldRunWebResearch(final)) {
     const fallback = await runWebResearchFallback(history, onEvent);
     history.push({ role: 'assistant', content: fallback.content });
@@ -546,4 +634,6 @@ module.exports = {
   normalizeToolCalls,
   shouldRunWebResearch,
   looksLikeManualInstructions,
+  splitImage,
+  imageToBase64,
 };
