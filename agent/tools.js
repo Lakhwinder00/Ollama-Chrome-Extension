@@ -517,7 +517,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'web_search',
       description:
-        'Search the web on Google and return the top related results with titles and URLs. Use this whenever you do not know the answer or need current information.',
+        'Search the web and return the top related results with titles and URLs. Use this whenever you do not know the answer or need current information. `query` must be a SHORT search phrase (a few keywords, max ~10 words) — never paste the whole user message, page text, or conversation into it. For page content use get_page instead.',
       parameters: {
         type: 'object',
         properties: {
@@ -689,7 +689,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'click',
       description:
-        'Click anywhere on the active browser tab. Prefer `index` from the latest get_dom snapshot (most reliable); selector and visible-text matching are fallbacks. Works on links, buttons, tabs, menus, or any other element.',
+        'Click anywhere on the active browser tab (requires approval; approve Session/Always once and the agent keeps acting automatically). Prefer `index` from the latest get_dom snapshot (most reliable); selector and visible-text matching are fallbacks. Works on links, buttons, tabs, menus, or any other element.',
       parameters: {
         type: 'object',
         properties: {
@@ -705,7 +705,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'type',
       description:
-        'Type text into an input, textarea, select, or content-editable field on the active tab, exactly like a user: characters are entered one by one with key events. Prefer `index` from the latest get_dom snapshot.',
+        'Type text into an input, textarea, select, or content-editable field on the active tab, exactly like a user: characters are entered one by one with key events (requires approval; approve Session/Always once to keep going automatically). Prefer `index` from the latest get_dom snapshot.',
       parameters: {
         type: 'object',
         properties: {
@@ -723,7 +723,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'edit_element',
       description:
-        'Update an existing element on the active page: change its text, inner HTML, form value, or an attribute. The change is applied immediately and the user sees it live in their tab (a refresh restores the original). Prefer `index` from the latest get_dom snapshot. Decide on your own when the page content needs changing — no approval needed.',
+        'Update an existing element on the active page: change its text, inner HTML, form value, or an attribute. The change is applied immediately and the user sees it live in their tab, highlighted so they can watch it happen (a refresh restores the original). Requires approval: the first change asks the user, and Session/Always lets the agent update and save content automatically. Prefer `index` from the latest get_dom snapshot.',
       parameters: {
         type: 'object',
         properties: {
@@ -744,7 +744,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'add_element',
       description:
-        'Add new content to the active page (insert HTML or plain text into/next to an element). The user sees it appear live in their tab; a refresh removes it. Use it to add missing content, notes, banners, or results to the page.',
+        'Add new content to the active page (insert HTML or plain text into/next to an element). The user sees it appear live in their tab, highlighted so they can watch it happen; a refresh removes it. Requires approval: the first insert asks the user, and Session/Always lets the agent add content automatically. Use it to add missing content, notes, banners, or results to the page.',
       parameters: {
         type: 'object',
         properties: {
@@ -762,7 +762,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'delete_element',
       description:
-        'Remove an element from the active page. The user sees it disappear live; a refresh restores it. Prefer `index` from the latest get_dom snapshot. Decide on your own when something on the page should go (noise, popups, banners).',
+        'Remove an element from the active page. The user sees it disappear live, with the removed spot boxed in red so they can watch it happen; a refresh restores it. Requires approval: the first removal asks the user, and Session/Always lets the agent delete automatically. Prefer `index` from the latest get_dom snapshot. Use it when something on the page should go (noise, popups, banners).',
       parameters: {
         type: 'object',
         properties: {

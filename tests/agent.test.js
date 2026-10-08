@@ -9,11 +9,13 @@ const assert = require('node:assert/strict');
 
 const {
   DANGEROUS_TOOLS,
+  MAX_ITERATIONS,
   convertToolCallObject,
   parseToolCallsFromContent,
   normalizeToolCalls,
   buildSystemPrompt,
   shouldRunWebResearch,
+  isPageActionRequest,
   looksLikeManualInstructions,
   splitImage,
   imageToBase64,
@@ -26,6 +28,15 @@ test('dangerous tools require approval (incl. git_commit/git_checkout)', () => {
     assert.ok(DANGEROUS_TOOLS.has(t), `${t} should be dangerous`);
   }
   for (const t of ['read_file', 'search_files', 'git_status', 'git_diff', 'git_log']) {
+    assert.ok(!DANGEROUS_TOOLS.has(t), `${t} should be read-only`);
+  }
+});
+
+test('browser tools that change the page require approval, read-only ones do not', () => {
+  for (const t of ['click', 'type', 'edit_element', 'add_element', 'delete_element']) {
+    assert.ok(DANGEROUS_TOOLS.has(t), `${t} should be dangerous`);
+  }
+  for (const t of ['get_page', 'get_dom', 'scroll', 'screenshot', 'navigate', 'search']) {
     assert.ok(!DANGEROUS_TOOLS.has(t), `${t} should be read-only`);
   }
 });
@@ -149,6 +160,64 @@ test('a model with no local answer streams the web fallback to the client', asyn
     assert.match(assistant[0].content, /Useful page text/);
     assert.match(result.content, /checked the web/);
     assert.ok(events.some((e) => e.type === 'tool' && e.name === 'web_search'));
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('isPageActionRequest separates "update my profile" from a research question', () => {
+  const researchPrompt =
+    'I\'m on a webpage with this content:\n0 notifications\nSkip to search\nMy Network\n\n' +
+    'The user asks: "Please update my profile.". Please provide a comprehensive analysis and answer their question.';
+  assert.equal(isPageActionRequest([{ role: 'user', content: researchPrompt }]), true);
+
+  assert.equal(
+    isPageActionRequest([
+      { role: 'user', content: '[Active browser tab]\nURL: https://x.com/in/me\n[/Active browser tab]\n\nFix my headline' },
+    ]),
+    true
+  );
+  assert.equal(isPageActionRequest([{ role: 'user', content: 'delete the promo banner from the page' }]), true);
+
+  assert.equal(isPageActionRequest([{ role: 'user', content: 'What is the latest news about AI?' }]), false);
+  assert.equal(isPageActionRequest([{ role: 'user', content: 'Tell me about my profile views' }]), false);
+  assert.equal(isPageActionRequest([{ role: 'user', content: 'How can I improve my profile?' }]), false);
+  assert.equal(isPageActionRequest([{ role: 'user', content: '' }]), false);
+});
+
+test('an "update the page" request is nudged to act, never answered with web research', async () => {
+  const originalFetch = global.fetch;
+  let fetches = 0;
+  global.fetch = async () => {
+    fetches++;
+    throw new Error('no network in tests');
+  };
+  try {
+    const events = [];
+    let calls = 0;
+    const provider = { name: 'mock', chatStream: async () => { calls++; return { message: { content: '' }, streamedContent: false }; } };
+    const result = await runAgent({
+      model: 'mock',
+      messages: [
+        {
+          role: 'user',
+          content:
+            'I\'m on a webpage with this content:\nHeadline: Old headline\n\n' +
+            'The user asks: "Please update my profile.". Please provide a comprehensive analysis and answer their question.',
+        },
+      ],
+      provider,
+      requestBrowser: async () => ({ ok: true }),
+      onEvent: (e) => events.push(e),
+    });
+
+    assert.equal(fetches, 0, 'the research fallback must not run for an edit request');
+    assert.ok(
+      events.some((e) => e.type === 'status' && /review the page and update it directly/i.test(e.message || '')),
+      'the model must be nudged to act on the tab'
+    );
+    assert.ok(calls > 1, 'the model must be asked again');
+    assert.ok(!/checked the web/i.test(result.content), 'no research answer may be produced');
   } finally {
     global.fetch = originalFetch;
   }
@@ -315,4 +384,132 @@ test('a model that keeps searching is forced to answer from what it gathered', a
     !events.some((e) => e.type === 'status' && /maximum steps/i.test(e.message || '')),
     'the user must never see "maximum steps reached" after successful synthesis'
   );
+});
+
+test('a JSON-only synthesis is retried with the strict plain-text prompt', async () => {
+  let calls = 0;
+  const provider = {
+    name: 'mock',
+    chatStream: async () => {
+      calls++;
+      if (calls <= 5) {
+        return {
+          message: {
+            content: '',
+            tool_calls: [{ function: { name: 'search', arguments: JSON.stringify({ query: 'ollama ' + calls }) } }],
+          },
+          streamedContent: false,
+        };
+      }
+      if (calls === 6) return { message: { content: '{"answer":"use qwen"}' }, streamedContent: false };
+      return { message: { content: 'Best pick: qwen2.5-coder for code, llama for chat.' }, streamedContent: false };
+    },
+  };
+  const result = await runAgent({
+    model: 'mock',
+    messages: [{ role: 'user', content: 'which local model should I use?' }],
+    provider,
+    requestBrowser: async () => ({ navigatedTo: 'https://www.google.com/search?q=ollama' }),
+  });
+  assert.equal(calls, 7, 'the JSON reply must trigger exactly one stricter retry');
+  assert.match(result.content, /qwen2\.5-coder/);
+});
+
+test('running out of steps returns a real progress summary, not a dead end', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => {
+    throw new Error('no network in tests');
+  };
+  try {
+    const events = [];
+    let calls = 0;
+    const provider = {
+      name: 'mock',
+      chatStream: async () => {
+        calls++;
+        if (calls <= MAX_ITERATIONS) {
+          return {
+            message: {
+              content: '',
+              tool_calls: [{ function: { name: 'list_directory', arguments: {} } }],
+            },
+            streamedContent: false,
+          };
+        }
+        // Every synthesis attempt answers with JSON only.
+        return { message: { content: '{"tool_calls":[]}' }, streamedContent: false };
+      },
+    };
+    const result = await runAgent({
+      model: 'mock',
+      messages: [{ role: 'user', content: 'Update my profile headline' }],
+      provider,
+      requestBrowser: async () => ({ ok: true }),
+      onEvent: (e) => events.push(e),
+    });
+
+    assert.equal(calls, MAX_ITERATIONS + 2, 'all steps + 2 synthesis attempts');
+    assert.doesNotMatch(result.content, /maximum number of steps without finishing/);
+    assert.doesNotMatch(result.content, /maximum steps reached/);
+    assert.match(result.content, /ran out of steps/i);
+    assert.match(result.content, /list_directory/);
+    assert.match(result.content, /continue/i);
+    assert.ok(
+      events.some((e) => e.type === 'status' && /Step limit reached/i.test(e.message || '')),
+      'the user must be told why the run stopped'
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('a question that runs out of steps still gets a researched final answer', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('duckduckgo')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          '<a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fguide">Example Guide</a>' +
+          '<a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fguide">The official guide</a>',
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '<html><head><title>Guide</title></head><body><p>Useful page text.</p></body></html>',
+    };
+  };
+  try {
+    let calls = 0;
+    const provider = {
+      name: 'mock',
+      chatStream: async () => {
+        calls++;
+        if (calls <= MAX_ITERATIONS) {
+          return {
+            message: {
+              content: '',
+              tool_calls: [{ function: { name: 'list_directory', arguments: {} } }],
+            },
+            streamedContent: false,
+          };
+        }
+        return { message: { content: '{bad json}' }, streamedContent: false };
+      },
+    };
+    const result = await runAgent({
+      model: 'mock',
+      messages: [{ role: 'user', content: 'What is the best local LLM?' }],
+      provider,
+      onEvent: () => {},
+    });
+    assert.match(result.content, /checked the web/, 'the run must end with a researched answer');
+    assert.match(result.content, /list_directory/, 'the progress summary must stay attached');
+    assert.doesNotMatch(result.content, /maximum steps reached/);
+  } finally {
+    global.fetch = originalFetch;
+  }
 });

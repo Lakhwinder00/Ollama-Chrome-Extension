@@ -119,7 +119,7 @@ function buildToolEl(name, args) {
   argsPre.textContent = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
   const result = document.createElement('div');
   result.className = 'tool-result';
-  result.textContent = '…';
+  result.textContent = 'working…';
   el.append(header, argsPre, result);
   const block = { type: 'tool', el, resultEl: result };
   lastBlock = block;
@@ -364,7 +364,14 @@ function pageGetDom(args) {
 }
 
 function ensureAgentRuntime() {
-  if (window.__agentRuntime) return true;
+  // Rebuild when an older injected runtime (without the newer helpers) is
+  // still cached on the page — the runtime is stateless, so this is safe.
+  if (window.__agentRuntime && typeof window.__agentRuntime.toast === 'function') return true;
+  try {
+    delete window.__agentRuntime;
+  } catch (e) {
+    window.__agentRuntime = undefined;
+  }
   const svg =
     '<svg width="26" height="26" viewBox="0 0 24 24"><path d="M4 2 L20 12 L12 13 L9 21 Z" fill="#1f1f1f" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/></svg>';
   const rectOf = (t) =>
@@ -414,6 +421,34 @@ function ensureAgentRuntime() {
           window.removeEventListener('scroll', onScroll);
         }, ms || 2200);
       } catch (e) { /* highlight is best-effort */ }
+    },
+    toast(msg, ms) {
+      try {
+        const old = document.querySelector('[data-agent-toast]');
+        if (old && old.remove) old.remove();
+        const t = document.createElement('div');
+        t.setAttribute('data-agent-toast', '1');
+        t.textContent = msg;
+        t.style.cssText =
+          'position:fixed;top:14px;left:50%;transform:translate(-50%,-8px);z-index:2147483649;' +
+          'max-width:70vw;padding:8px 14px;border-radius:999px;background:#1f1f1f;color:#fff;' +
+          'font:600 13px/1.4 system-ui,-apple-system,sans-serif;letter-spacing:.2px;' +
+          'box-shadow:0 4px 16px rgba(0,0,0,.45);border:1px solid #d97757;opacity:0;' +
+          'transition:opacity .18s ease,transform .18s ease;pointer-events:none;white-space:nowrap;' +
+          'overflow:hidden;text-overflow:ellipsis;';
+        document.body.appendChild(t);
+        requestAnimationFrame(() => {
+          t.style.opacity = '1';
+          t.style.transform = 'translate(-50%,0)';
+        });
+        setTimeout(() => {
+          t.style.opacity = '0';
+          t.style.transform = 'translate(-50%,-8px)';
+          setTimeout(() => {
+            try { t.remove(); } catch (e) { /* already gone */ }
+          }, 220);
+        }, ms || 2400);
+      } catch (e) { /* toast is best-effort */ }
     },
     mouse(el) {
       try {
@@ -594,6 +629,7 @@ function pageClick(args) {
       tag: el.tagName.toLowerCase(),
       text: ((el.innerText || el.textContent) || '').trim().slice(0, 120),
     };
+    rt.toast('Agent clicked ' + (out.text ? '“' + out.text.slice(0, 40) + '”' : '<' + out.tag + '>'));
     if (res && res.clientX != null) out.at = { x: res.clientX, y: res.clientY };
     if (a.index != null && a.index !== '') out.index = Number(a.index);
     return out;
@@ -625,6 +661,7 @@ function pageType(args) {
   return rt.wait(550).then(() => {
     rt.highlight(el, '#d97757', 2400);
     const r = rt.type(el, a.value);
+    rt.toast('Agent typed into ' + (a.selector || a.text || el.name || el.id || 'the field'));
     return {
       typed: true,
       into: a.selector || a.text || (a.index != null && a.index !== '' ? '#' + a.index : ''),
@@ -934,6 +971,7 @@ function pageEditElement(args) {
     }
     rt.highlight(el, '#d97757', 2400);
     const after = ((el.innerText || el.textContent || el.value) || '').trim().slice(0, 200);
+    rt.toast('Agent updated this element live');
     return {
       updated: true,
       mode,
@@ -985,6 +1023,7 @@ function pageAddElement(args) {
     } catch (e) { /* scroll is best-effort */ }
     rt.aim(firstEl);
     rt.highlight(firstEl, '#28a745', 2600);
+    rt.toast('Agent added content to this page');
   } else if (firstEl) {
     try {
       firstEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -1019,6 +1058,7 @@ function pageDeleteElement(args) {
   };
   el.scrollIntoView({ block: 'center', behavior: 'auto' });
   rt.aim(el);
+  rt.toast('Agent removed <' + info.tag + '> from this page');
   return rt.wait(550).then(() => {
     try {
       const r = el.getBoundingClientRect();
@@ -1334,6 +1374,13 @@ function handleEvent(event, data) {
       break;
     case 'status': {
       const message = payload.message || '…';
+      // Heartbeat lines repeat while the model is silent — update in place so
+      // the transcript does not fill up with identical pills.
+      if (/still working/i.test(message) && lastBlock && lastBlock.type === 'status') {
+        lastBlock.el.textContent = message;
+        scrollToBottom();
+        break;
+      }
       if (isPlanningStatus(message)) {
         appendThinking(message);
         break;
@@ -1412,6 +1459,25 @@ async function readStream(body) {
 }
 
 // ---------------- sending ----------------
+/**
+ * True when the user wants the PAGE changed ("update my profile", "fix the
+ * headline") rather than an answer to a question — those prompts must tell the
+ * model to edit the active tab instead of writing an analysis.
+ */
+function looksLikePageEditRequest(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  const question =
+    t.includes('?') ||
+    /^\s*(what|who|when|where|why|how|which|is|are|was|were|does|did|do|can|could|will|would|should|explain|describe|summar\w*|tell me)\b/i.test(
+      t
+    );
+  if (question) return false;
+  return /\b(updat\w*|edit\w*|chang\w*|fix\w*|correct\w*|replac\w*|rewrit\w*|fill\w*|add\w*|remov\w*|delet\w*|sav\w*|submit\w*|publish\w*|post\w*|writ\w*|appl\w*|renam\w*|complet\w*|improv\w*)\b/i.test(
+    t
+  );
+}
+
 // Capture the active tab's content and frame it as context for the model.
 function buildTabContext(snap) {
   const s = snap || {};
@@ -1482,8 +1548,13 @@ async function sendMessage() {
           .join('\n');
         pageContext = `Relevant links found on page:\n${relevantLinks}`;
       }
-      // Generate proper prompt: combine page context with user's question
-      searchPrompt = `I'm on a webpage with this content:\n${pageContext}\n\nThe user asks: "${userPrompt}". Please provide a comprehensive analysis and answer their question.`;
+      // Generate proper prompt: combine page context with user's question.
+      // "Update my profile" must stay an EDIT task — the old template forced
+      // "provide a comprehensive analysis", so the model researched instead of
+      // changing the page.
+      searchPrompt = looksLikePageEditRequest(userPrompt)
+        ? `I'm on a webpage with this content:\n${pageContext}\n\nThe user asks: "${userPrompt}". Review this active tab and perform the change yourself with the browser tools (get_dom, click, type, edit_element, add_element, delete_element), then screenshot to verify. Do NOT answer with analysis, research, or step-by-step instructions — actually update the page and report what you changed.`
+        : `I'm on a webpage with this content:\n${pageContext}\n\nThe user asks: "${userPrompt}". Please provide a comprehensive analysis and answer their question.`;
       outMessage = searchPrompt;
     } catch (e) {
       appendStatus('⚠ Prompt generation failed: ' + ((e && e.message) || e));

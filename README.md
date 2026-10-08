@@ -37,8 +37,12 @@ User → Ollama ("I need to read login.js")
 - The agent can only touch files **inside the project root you choose** — every path is
   resolved and checked before it touches disk.
 - Dangerous operations (`write_file`, `edit_file`, `delete_file`, `run_command`, `git_commit`,
-  `git_checkout`) pause and ask for approval first.
+  `git_checkout`, plus browser `click`, `type`, `edit_element`, `add_element`, `delete_element`)
+  pause and ask for approval first.
 - Approvals have **scopes**: *Once*, *Session*, or *Always* (persisted in `~/.myagent/permissions.json`).
+  Approve once with *Session*/*Always* and the agent updates and saves page content automatically.
+- Every page change is shown live in the tab: a "Agent …" toast plus a colored highlight on the
+  exact element, so you can watch each click, typing, edit, insert, and delete happen.
 - The server binds to `127.0.0.1` only.
 
 ## Requirements
@@ -82,6 +86,12 @@ Pick a model from the dropdown, then just ask it to fix a bug.
 > toggle (on by default). When enabled, it captures the active tab's URL, title,
 > and text and attaches it to each message so the agent can plan and act on the
 > page step by step, like Claude.
+
+> **Edit requests act, they don't research:** asking to "update / fix / save /
+> delete" something on the page makes the model review the active tab and change
+> it (`get_dom` → `click`/`type`/`edit_element` → screenshot) instead of running a
+> web search and writing an analysis. The first change asks for approval
+> (*Once*/*Session*/*Always*), and each change is highlighted live in your tab.
 
 ## Server API
 
@@ -223,5 +233,15 @@ extension/
 ## Troubleshooting
 
 - **"ollama unreachable"** — start Ollama (`ollama serve`) and check `http://127.0.0.1:11434`.
+- **Panel looks frozen** — it is not: a pulsing `working…` shows a running tool, and a
+  "… still working, waiting for the model (Ns)" line appears every ~12s while the model is
+  silent. Web searches/fetches time out after 15–20s instead of hanging, and research reads
+  announce "Reading source 1/3…" as it goes.
+- **"Step limit reached"** — a run stops after 20 steps, but it never ends in an error: the
+  model is first asked twice for a plain-text final answer (JSON-only replies are retried),
+  and if that fails the question is **researched from scratch** (search + reads) and answered,
+  with the list of tool calls, outcomes, and any page/file changes appended. Reply **continue**
+  to resume from there. The old "Stopped: maximum steps reached." message no longer exists —
+  if you still see it, restart `agent/server.js` (old code in memory) and press **Clear History**.
 - **Model doesn't call tools** — use a tools-capable model (`qwen2.5-coder:14b`).
 - **"Access denied"** — the path resolved outside the project root; set the right project.

@@ -620,6 +620,15 @@ button, input, select, textarea, label { font-family: inherit; }
   color: var(--text-2);
   word-break: break-word;
 }
+/* Still running: make the wait obvious instead of looking frozen. */
+.msg.tool .tool-result:not(.ok):not(.err) {
+  color: var(--text-3);
+  animation: tool-working 1.1s ease-in-out infinite;
+}
+@keyframes tool-working {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
 .msg.tool .tool-result .ok,
 .msg.tool .tool-result.ok { color: var(--success); }
 .msg.tool .tool-result .err,

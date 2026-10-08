@@ -32,16 +32,77 @@ function htmlDecode(s) {
     .trim();
 }
 
+// Never let a silent fetch look like a hang: every request gets a hard cap.
+const SEARCH_TIMEOUT_MS = 15000;
+const PAGE_TIMEOUT_MS = 20000;
+const MAX_QUERY_CHARS = 300;
+
+function timeoutError(ms) {
+  return new Error(`Request timed out after ${Math.round(ms / 1000)}s.`);
+}
+
+/** Read a response body, turning an abort into the same clear timeout error. */
+async function readText(res, ms) {
+  try {
+    return await res.text();
+  } catch (e) {
+    if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) throw timeoutError(ms);
+    throw e;
+  }
+}
+
+/**
+ * Search engines need a short phrase, not a whole prompt. The extension's
+ * research mode builds a message that contains the entire page text, and both
+ * the model and the research fallback used to pass that whole blob as the
+ * query (giant URLs, no results, minutes of wasted time).
+ */
+function sanitizeSearchQuery(raw) {
+  let q = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!q) return q;
+
+  // 1. "I'm on a webpage with this content: ... The user asks: "...""
+  const asked = /The user asks?:\s*["“]([^"”]{4,})["”]/i.exec(q);
+  if (asked) q = asked[1].replace(/\s+/g, ' ').trim();
+
+  // 2. "[Search performed based on your prompt: ...]"
+  if (!asked) {
+    const bracket = /\[Search performed based on your prompt:\s*([\s\S]{4,}?)\]/i.exec(q);
+    if (bracket) q = bracket[1].replace(/\s+/g, ' ').trim();
+  }
+
+  // 3. "[Active browser tab ...] Title: ... --- page text --- [/Active browser tab] user question"
+  if (!asked && /\[Active browser tab/.test(q)) {
+    const title = /Title:\s*([\s\S]{1,160}?)(?:\s+---|\s+\[\/?Active|\s*$)/i.exec(q);
+    const parts = q.split('[/Active browser tab]');
+    const question = (parts[1] || '').replace(/^\s*[:\-–—]*/, '').replace(/\s+/g, ' ').trim();
+    q =
+      [title ? title[1].replace(/\s+/g, ' ').trim() : '', question].filter(Boolean).join(' ').trim() || q;
+  }
+
+  if (q.length > MAX_QUERY_CHARS) {
+    q = q.slice(0, MAX_QUERY_CHARS);
+    const lastSpace = q.lastIndexOf(' ');
+    if (lastSpace > MAX_QUERY_CHARS * 0.5) q = q.slice(0, lastSpace);
+    q = q.replace(/[,;:.–—-]\s*$/, '').trim();
+  }
+  return q || String(raw || '').trim().slice(0, MAX_QUERY_CHARS);
+}
+
 /** DuckDuckGo HTML endpoint — primary source (no key, no JS required). */
 async function searchDuckDuckGo(q) {
   const res = await fetch('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(q), {
     headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' },
+    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+  }).catch((e) => {
+    if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) throw timeoutError(SEARCH_TIMEOUT_MS);
+    throw e;
   });
   if (res.status === 403 || res.status === 429) {
     throw new Error('DuckDuckGo blocked this request (rate limit or bot detection).');
   }
   if (!res.ok) throw new Error(`DuckDuckGo request failed (HTTP ${res.status}).`);
-  const html = await res.text();
+  const html = await readText(res, SEARCH_TIMEOUT_MS);
 
   const titles = new Map(); // url -> title
   const snippets = new Map(); // url -> snippet
@@ -93,12 +154,16 @@ async function searchDuckDuckGo(q) {
 async function searchBingRss(q) {
   const res = await fetch('https://www.bing.com/search?q=' + encodeURIComponent(q) + '&format=rss', {
     headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' },
+    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+  }).catch((e) => {
+    if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) throw timeoutError(SEARCH_TIMEOUT_MS);
+    throw e;
   });
   if (res.status === 403 || res.status === 429) {
     throw new Error('Bing blocked this request (rate limit or bot detection).');
   }
   if (!res.ok) throw new Error(`Bing request failed (HTTP ${res.status}).`);
-  const xml = await res.text();
+  const xml = await readText(res, SEARCH_TIMEOUT_MS);
 
   const results = [];
   const seen = new Set();
@@ -126,7 +191,7 @@ async function searchBingRss(q) {
 }
 
 async function webSearch(query) {
-  const q = String(query || '').trim();
+  const q = sanitizeSearchQuery(query);
   if (!q) throw new Error('web_search requires a "query".');
   await politeDelay();
 
@@ -153,12 +218,16 @@ async function fetchPageText(url) {
   await politeDelay();
   const res = await fetch(target, {
     headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' },
+    signal: AbortSignal.timeout(PAGE_TIMEOUT_MS),
+  }).catch((e) => {
+    if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) throw timeoutError(PAGE_TIMEOUT_MS);
+    throw e;
   });
   if (res.status === 403 || res.status === 429) {
     throw new Error('The site blocked this request (403/429). Try a different source URL.');
   }
   if (!res.ok) throw new Error(`Fetch failed (HTTP ${res.status}).`);
-  const html = await res.text();
+  const html = await readText(res, PAGE_TIMEOUT_MS);
 
   const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
   const title = titleMatch ? htmlDecode(titleMatch[1]) : '';
@@ -176,4 +245,4 @@ async function fetchPageText(url) {
   return text.slice(0, 8000);
 }
 
-module.exports = { webSearch, fetchPageText, htmlDecode };
+module.exports = { webSearch, fetchPageText, htmlDecode, sanitizeSearchQuery };

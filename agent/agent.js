@@ -7,6 +7,7 @@ const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const { OllamaProvider } = require('./provider');
+const { sanitizeSearchQuery } = require('./web');
 const { execute, getProjectRoot, TOOL_DEFINITIONS, BROWSER_TOOLS } = require('./tools');
 
 const DANGEROUS_TOOLS = new Set([
@@ -16,8 +17,16 @@ const DANGEROUS_TOOLS = new Set([
   'run_command',
   'git_commit',
   'git_checkout',
+  // Browser tools that change the live page (update/save/remove content).
+  // They pause for approval the first time; Session/Always lets the agent
+  // keep acting automatically while the user watches it happen in the tab.
+  'click',
+  'type',
+  'edit_element',
+  'add_element',
+  'delete_element',
 ]);
-const MAX_ITERATIONS = 15;
+const MAX_ITERATIONS = 40;
 const MAX_HISTORY = 80;
 const MAX_RESEARCH_CALLS = 5;
 
@@ -51,17 +60,17 @@ function buildSystemPrompt() {
     '- git_branch() — list branches.',
     '- git_checkout(branch) — switch to a branch (requires approval).',
     '- git_commit(message, files?, all?) — stage and commit changes (requires approval). Show git_diff first.',
-    '- web_search(query) — search the web on Google and return the top related links.',
+    '- web_search(query) — search the web and return the top related links. query must be a few short keywords, never the whole message or page text.',
     '- fetch_url(url) — fetch a web page and read its text (use after web_search to read a result).',
     '',
     "Browser tools (operate on the user's active Chrome tab):",
     "- get_page(max_chars?, max_scrolls?) — read the tab's URL, title, and full page text (auto-scrolls).",
     '- get_dom(selector?, max_items?) — snapshot the page as a numbered element list (index, tag, text, selector). Re-run it whenever an index looks stale.',
-    '- click(index? or selector? or text?) — click any element on the page. index (from get_dom) is the most reliable.',
-    '- type(index? or selector? or text?, value) — type into a field on the page, character by character as a user would.',
-    '- edit_element(index? or selector? or match?, text?/html?/value?/attribute?, attribute_value?) — update an existing element on the page.',
-    '- add_element(html? or text?, selector?, index?, position?) — add new content to the page.',
-    '- delete_element(index? or selector? or match?) — remove an element from the page.',
+    '- click(index? or selector? or text?) — click any element on the page (requires approval). index (from get_dom) is the most reliable.',
+    '- type(index? or selector? or text?, value) — type into a field on the page, character by character as a user would (requires approval).',
+    '- edit_element(index? or selector? or match?, text?/html?/value?/attribute?, attribute_value?) — update an existing element on the page (requires approval).',
+    '- add_element(html? or text?, selector?, index?, position?) — add new content to the page (requires approval).',
+    '- delete_element(index? or selector? or match?) — remove an element from the page (requires approval).',
     '- scroll(direction?, amount?, selector?) — scroll the page or an element into view.',
     '- screenshot — capture the active tab. With a vision-capable model the image is sent back to you so you can see the page like the user does.',
     '- navigate(url) — open a URL in the active tab.',
@@ -71,7 +80,8 @@ function buildSystemPrompt() {
     "When the user refers to a page, profile, or website, read the active tab with get_page first. If it is not the right page, use search to find it on Google.",
     'Decide yourself whether a search is needed: the extension never searches on its own. Call search only when the answer, page, or profile genuinely requires it (unknown or current information, or the right page is not open). If you can answer from the active tab or your knowledge, do not search.',
     'Every browser action runs live in the user-visible active tab, and the user watches it happen step by step. Prefer a short, precise search query over a long prompt, and never search speculatively.',
-    'You may change the page itself when you judge it needs changing (fix or update text, add missing content, remove noise or popups): call edit_element/add_element/delete_element and act automatically without asking. Changes only affect the current tab and disappear on refresh, so be bold but purposeful — change what the task requires, then screenshot to verify.',
+    'You may change the page itself when you judge it needs changing (fix or update text, add missing content, remove noise or popups): call edit_element/add_element/delete_element (and click/type). The user is asked to approve the first change — approve it as Session or Always and the agent keeps acting automatically — while every change is highlighted live in their tab, so do not ask the user to approve each step in chat. Changes only affect the current tab and disappear on refresh, so be bold but purposeful — change what the task requires, then screenshot to verify.',
+    'EDIT REQUESTS ARE NOT RESEARCH: when the user asks to update, edit, fix, save, fill, add, or remove something ("update my profile", "correct my headline", "save the form"), you MUST act on the active tab (get_dom → click/type/edit_element → screenshot) and report what changed. Never answer an edit request with web_search, a link list, or a written analysis, and never hand the steps back to the user.',
     'You CAN edit live pages the user already has open — profiles, settings, forms, dashboards. For example, updating a profile means: click the Edit button, click each field, type the new text, click Save — all with your tools.',
     'NEVER hand manual instructions back to the user ("click Edit yourself", "you need to update...", numbered how-to steps) while the relevant page is (or can be) open in the active tab. Do the steps yourself instead. Only fall back to written instructions if a tool genuinely failed and you show the error.',
     'After clicking, typing, scrolling, or editing, take a screenshot to verify what happened.',
@@ -195,6 +205,51 @@ function shouldRunWebResearch(content) {
   return /(i don['’]t know|not sure|unable to answer|cannot determine|can['’]t answer|not enough information|unknown|unsure|i do not know|i am not sure|i can['’]t tell)/i.test(text);
 }
 
+const PAGE_ACTION_RE =
+  /\b(updat\w*|edit\w*|chang\w*|fix\w*|correct\w*|replac\w*|rewrit\w*|fill\w*|add\w*|remov\w*|delet\w*|sav\w*|submit\w*|publish\w*|post\w*|writ\w*|appl\w*|renam\w*|complet\w*|improv\w*)\b/i;
+
+/** The raw text of the last user message (context wrappers included). */
+function lastUserText(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i];
+    if (m && m.role === 'user' && typeof m.content === 'string' && m.content.trim()) return m.content;
+  }
+  return '';
+}
+
+/**
+ * The user's own words, with the extension's context wrappers stripped:
+ * the research prompt ("The user asks: …") and the active-tab block.
+ */
+function userIntentText(messages) {
+  let text = lastUserText(messages);
+  const asked = /The user asks?:\s*["“]([^"”]{1,600})["”]/i.exec(text);
+  if (asked) return asked[1].trim();
+  const marker = '[/Active browser tab]';
+  const idx = text.indexOf(marker);
+  if (idx !== -1) text = text.slice(idx + marker.length);
+  return text.trim().slice(0, 600);
+}
+
+/**
+ * True when the user asked to CHANGE the page ("update my profile", "fix the
+ * headline", "delete the banner") instead of asking a factual question. Those
+ * must be answered by acting on the active tab — never by web research.
+ */
+function isPageActionRequest(messages) {
+  const intent = userIntentText(messages);
+  if (!intent) return false;
+  // Questions are research, not edits ("How can I improve my profile?").
+  const looksLikeQuestion =
+    intent.includes('?') ||
+    /^\s*(what|who|when|where|why|how|which|is|are|was|were|does|did|do|can|could|will|would|should|explain|describe|summar\w*|tell me)\b/i.test(
+      intent
+    );
+  if (looksLikeQuestion) return false;
+  return PAGE_ACTION_RE.test(intent);
+}
+
 const MAX_BROWSER_NUDGES = 2;
 const ACT_DIRECTLY_PROMPT =
   'Use your browser tools and do it yourself on the active tab right now — do not give me manual instructions. Read the page (get_page or get_dom), perform each step with click / type / edit_element / add_element, verify with screenshot, and only then summarize what you changed. If a tool genuinely fails, show the error and continue with the next step.';
@@ -230,49 +285,169 @@ function imageToBase64(dataUrl) {
 }
 
 /**
+ * Live "still working" heartbeat: large prompts (page context + search
+ * results) can make the model stay silent for a long time, and the UI looked
+ * frozen. Emits a status line every ~12s of model silence until stopped.
+ */
+function startHeartbeat(onEvent, label) {
+  let last = Date.now();
+  const timer = setInterval(() => {
+    const idle = Math.round((Date.now() - last) / 1000);
+    if (idle >= 12) {
+      onEvent({ type: 'status', message: `${label} — still working, waiting for the model (${idle}s)…` });
+    }
+  }, 6000);
+  return {
+    touch: () => {
+      last = Date.now();
+    },
+    stop: () => clearInterval(timer),
+  };
+}
+
+/**
  * Last-resort answer: after the model has searched/read enough (or burned all
  * its steps), ask it once — without tools — to answer from what it gathered,
  * so the user never ends up with "maximum steps reached" and nothing else.
  */
-async function synthesizeFinalAnswer({ history, provider, model, signal, onEvent = () => {} }) {
-  onEvent({ type: 'status', message: 'Enough information gathered — writing the final answer…' });
-  let streamed = '';
-  let res;
-  try {
-    res = await provider.chatStream({
-      model,
-      messages: [
-        ...history,
-        {
-          role: 'user',
-          content:
-            'You have gathered enough information. Give the final answer NOW using only the tool results already in this conversation. Do NOT call any tools. Start with the direct answer, cite the sources (title + URL) from the search results, and end with a short confidence note.',
-        },
-      ],
-      think: false,
-      signal,
-      onDelta: (d) => {
-        if (d.type === 'thinking') onEvent({ type: 'thinking', content: d.content });
-        else if (d.type === 'assistant') {
-          streamed += d.content;
-          onEvent({ type: 'assistant', content: d.content });
-        }
-      },
-    });
-  } catch (e) {
-    if (signal && signal.aborted) return null;
+/**
+ * Last-resort answer: after the model has searched/read enough (or burned all
+ * its steps), ask it — without tools — to answer from what it gathered.
+ * Local models often answer with an empty string or a JSON blob, so the
+ * prompt is retried with a stricter plain-text instruction before giving up.
+ */
+const SYNTHESIS_PROMPTS = [
+  'You have gathered enough information. Give the final answer NOW using only the tool results already in this conversation. Do NOT call any tools. Start with the direct answer, cite the sources (title + URL) from the search results, and end with a short confidence note.',
+  'Write the final answer now as PLAIN TEXT ONLY: no JSON, no code fences, no tool calls, no bracketed objects. If you output a single "{" or "[" the user sees nothing. Give 3-6 short bullet lines starting with "- ", answering the request from the tool results already in this conversation.',
+];
+
+/** Reject empty, JSON-only, or fenced-only replies so a retry can happen. */
+function usableFinalText(raw) {
+  let text = String(raw || '').trim();
+  if (!text) return null;
+  text = text.replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/, '').trim();
+  if (!text) return null;
+  if (/^[\[{]/.test(text)) {
+    // JSON-only reply — useless to the user; let the stricter retry handle it.
     return null;
   }
-  const text = (streamed || (res && res.message && res.message.content) || '').trim();
-  if (!text || /^\s*[{[]/.test(text)) return null;
-  if (!streamed) onEvent({ type: 'assistant', content: text });
+  if (text.length < 10) return null;
   return text;
+}
+
+async function synthesizeFinalAnswer({ history, provider, model, signal, onEvent = () => {} }) {
+  onEvent({ type: 'status', message: 'Enough information gathered — writing the final answer…' });
+
+  for (let attempt = 0; attempt < SYNTHESIS_PROMPTS.length; attempt++) {
+    let streamed = '';
+    let res;
+    const hb = startHeartbeat(onEvent, 'Writing the final answer');
+    try {
+      res = await provider.chatStream({
+        model,
+        messages: [
+          ...history,
+          { role: 'user', content: SYNTHESIS_PROMPTS[attempt] },
+        ],
+        think: false,
+        signal,
+        onDelta: (d) => {
+          hb.touch();
+          if (d.type === 'thinking') onEvent({ type: 'thinking', content: d.content });
+          else if (d.type === 'assistant') {
+            streamed += d.content;
+            onEvent({ type: 'assistant', content: d.content });
+          }
+        },
+      });
+    } catch (e) {
+      if (signal && signal.aborted) return null;
+      // network/model error — try the next prompt before giving up
+      continue;
+    } finally {
+      hb.stop();
+    }
+    const text = usableFinalText(streamed || (res && res.message && res.message.content));
+    if (!text) continue; // empty or JSON-only: retry with the stricter prompt
+    if (!streamed) onEvent({ type: 'assistant', content: text });
+    return text;
+  }
+  return null;
+}
+
+/** One-line outcome of a tool result, safe to show in a progress list. */
+function briefToolResult(content) {
+  let s = typeof content === 'string' ? content : JSON.stringify(content ?? '');
+  try {
+    const obj = JSON.parse(s);
+    if (obj && typeof obj === 'object') {
+      if (obj.error) s = String(obj.error);
+      else if (Array.isArray(obj.results)) s = `${obj.results.length} search result(s)`;
+      else s = JSON.stringify(obj);
+    }
+  } catch {
+    // plain string already
+  }
+  s = String(s).replace(/\s+/g, ' ').trim();
+  if (s.length > 140) s = s.slice(0, 137) + '…';
+  return s || 'ok';
+}
+
+/**
+ * Deterministic wrap-up used when the model never produces a final answer:
+ * lists every tool call of the run with its outcome, so the user always gets
+ * a real result instead of "maximum steps reached".
+ */
+function progressSummary(history, lead) {
+  const steps = [];
+  for (const m of history) {
+    if (!m || m.role === 'system') continue;
+    if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+      for (const tc of m.tool_calls) {
+        const fn = (tc && tc.function) || {};
+        steps.push({ name: String(fn.name || 'tool'), outcome: '' });
+      }
+    } else if (m.role === 'tool' && steps.length) {
+      for (let i = steps.length - 1; i >= 0; i--) {
+        if (!steps[i].outcome) {
+          steps[i].outcome = briefToolResult(m.content);
+          break;
+        }
+      }
+    }
+  }
+
+  const request = userIntentText(history).slice(0, 160);
+  const shown = steps.slice(-10);
+  const lines = shown.map((s) => `- ${s.name}: ${s.outcome || 'done'}`);
+  const changed = steps.filter((s) =>
+    /^(edit_element|add_element|delete_element|click|type|write_file|edit_file|run_command)$/.test(s.name)
+  );
+
+  const out = [
+    lead ||
+      (request
+        ? `I ran out of steps before finishing "${request}". Here is what I did:`
+        : 'I ran out of steps before finishing. Here is what I did:'),
+    '',
+    ...(lines.length ? lines : ['- No tools were executed.']),
+    '',
+    changed.length
+      ? `${changed.length} change(s) were applied — check the page/files above.`
+      : 'No changes were saved yet.',
+    '',
+    `Say "continue" to resume from these results (I will pick up where I stopped), or ask with a narrower request. Limit: ${MAX_ITERATIONS} steps per run.`,
+  ];
+  return out.join('\n');
 }
 
 async function runWebResearchFallback(messages, onEvent = () => {}) {
   const userMessages = (Array.isArray(messages) ? messages : []).filter((m) => m.role === 'user' && typeof m.content === 'string');
-  const query = (userMessages.at(-1)?.content || '').trim() || 'latest facts and official sources';
+  const rawQuery = (userMessages.at(-1)?.content || '').trim() || 'latest facts and official sources';
+  // The user message may carry the whole page as context — never search with it.
+  const query = sanitizeSearchQuery(rawQuery);
   onEvent({ type: 'status', message: 'No answer from the model; checking web sources…' });
+  onEvent({ type: 'tool', name: 'web_search', arguments: { query } });
 
   let search;
   try {
@@ -281,10 +456,10 @@ async function runWebResearchFallback(messages, onEvent = () => {}) {
     const message =
       'I could not answer from local context, and the web search failed: ' +
       String((err && err.message) || err);
+    onEvent({ type: 'tool_result', name: 'web_search', ok: false, error: message });
     onEvent({ type: 'assistant', content: message });
     return { content: message, sources: [] };
   }
-  onEvent({ type: 'tool', name: 'web_search', arguments: { query } });
   onEvent({ type: 'tool_result', name: 'web_search', ok: true, summary: `search: ${search.query}`, detail: JSON.stringify(search.results.slice(0, 3), null, 2) });
 
   if (!Array.isArray(search.results) || !search.results.length) {
@@ -295,8 +470,13 @@ async function runWebResearchFallback(messages, onEvent = () => {}) {
 
   const sources = Array.isArray(search && search.results) ? search.results.slice(0, 3) : [];
   const snippets = [];
-  for (const result of sources) {
+  for (let i = 0; i < sources.length; i++) {
+    const result = sources[i];
     if (!result || !result.url) continue;
+    onEvent({
+      type: 'status',
+      message: `Reading source ${i + 1}/${sources.length}: ${(result.title || result.url).slice(0, 70)}…`,
+    });
     try {
       const page = await execute('fetch_url', { url: result.url });
       // fetch_url returns { url, content } — never String() the object itself.
@@ -441,6 +621,7 @@ async function runAgent({
   // short "think out loud" pass so the user can still see the model's plan.
   if (planFirst) {
     onEvent({ type: 'status', message: 'Planning…' });
+    const planHb = startHeartbeat(onEvent, 'Planning');
     try {
       await provider.chatStream({
         model,
@@ -448,17 +629,19 @@ async function runAgent({
         think,
         signal,
         onDelta: (d) => {
+          planHb.touch();
           if (d.type === 'thinking') onEvent({ type: 'thinking', content: d.content });
           else if (d.type === 'assistant') onEvent({ type: 'thinking', content: d.content });
         },
       });
-      // The plan is shown to the user for transparency only; it is not fed
-      // back into the loop (that would make some models skip the actual work).
     } catch {
       if (signal && signal.aborted) {
+        planHb.stop();
         return { content: 'Stopped by the user.', history, stopped: true };
       }
       // planning is best-effort; continue even if it fails
+    } finally {
+      planHb.stop();
     }
   }
 
@@ -469,6 +652,7 @@ async function runAgent({
     onEvent({ type: 'status', message: step === 1 ? 'Thinking…' : `Step ${step}: continuing…` });
 
     let res;
+    const hb = startHeartbeat(onEvent, step === 1 ? 'Thinking' : `Step ${step}`);
     try {
       res = await provider.chatStream({
         model,
@@ -477,6 +661,7 @@ async function runAgent({
         think,
         signal,
         onDelta: (d) => {
+          hb.touch();
           if (d.type === 'thinking') onEvent({ type: 'thinking', content: d.content });
           else if (d.type === 'assistant') onEvent({ type: 'assistant', content: d.content });
         },
@@ -486,6 +671,8 @@ async function runAgent({
         return { content: 'Stopped by the user.', history, stopped: true };
       }
       throw e;
+    } finally {
+      hb.stop();
     }
     const msg = res.message || {};
     let content = msg.content || '';
@@ -512,6 +699,7 @@ async function runAgent({
     });
 
     if (!toolCalls.length) {
+      const wantsPageEdit = isPageActionRequest(history);
       if (
         browserNudges < MAX_BROWSER_NUDGES &&
         typeof requestBrowser === 'function' &&
@@ -521,6 +709,22 @@ async function runAgent({
         onEvent({ type: 'status', message: 'Asking the model to do it directly in the browser…' });
         history.push({ role: 'user', content: ACT_DIRECTLY_PROMPT });
         continue;
+      }
+      // An "update the page" request must never fall into web research.
+      if (wantsPageEdit && shouldRunWebResearch(content)) {
+        if (browserNudges < MAX_BROWSER_NUDGES && typeof requestBrowser === 'function') {
+          browserNudges++;
+          onEvent({ type: 'status', message: 'Asking the model to review the page and update it directly…' });
+          history.push({ role: 'user', content: ACT_DIRECTLY_PROMPT });
+          continue;
+        }
+        if (!content.trim()) {
+          content =
+            'I need the Chrome extension side panel open to review and update the active tab. Open the extension on that page and ask me again — then I can make the changes directly instead of researching them.';
+          const last = history[history.length - 1];
+          if (last && last.role === 'assistant') last.content = content;
+        }
+        return { content, history };
       }
       if (shouldRunWebResearch(content)) {
         const fallback = await runWebResearchFallback(history, onEvent);
@@ -609,30 +813,41 @@ async function runAgent({
     }
   }
 
-  const final =
-    'I reached the maximum number of steps without finishing. Please ask me to continue or narrow the task.';
+  // The model never produced a usable final answer. ALWAYS turn the run into a
+  // real result: synthesize one (with a strict plain-text retry), and when that
+  // still fails, research the question from scratch — then attach a progress
+  // summary. There is no dead-end message anymore.
+  onEvent({
+    type: 'status',
+    message: `Step limit reached (${MAX_ITERATIONS} steps) — finishing with a researched answer and a summary…`,
+  });
   const synthesized = await synthesizeFinalAnswer({ history, provider, model, signal, onEvent });
   if (synthesized) {
     history.push({ role: 'assistant', content: synthesized });
     return { content: synthesized, history };
   }
-  if (shouldRunWebResearch(final)) {
+
+  let answer = null;
+  if (!isPageActionRequest(history)) {
     const fallback = await runWebResearchFallback(history, onEvent);
-    history.push({ role: 'assistant', content: fallback.content });
-    return { content: fallback.content, history };
+    answer = (fallback && fallback.content) || null;
   }
-  onEvent({ type: 'status', message: 'Stopped: maximum steps reached.' });
-  return { content: final, history };
+  const summary = progressSummary(history, answer ? 'Run details:' : undefined);
+  const content = answer ? `${answer}\n\n---\n\n${summary}` : summary;
+  history.push({ role: 'assistant', content });
+  return { content, history };
 }
 
 module.exports = {
   runAgent,
   buildSystemPrompt,
   DANGEROUS_TOOLS,
+  MAX_ITERATIONS,
   convertToolCallObject,
   parseToolCallsFromContent,
   normalizeToolCalls,
   shouldRunWebResearch,
+  isPageActionRequest,
   looksLikeManualInstructions,
   splitImage,
   imageToBase64,
