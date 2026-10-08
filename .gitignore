@@ -1,12 +1,4 @@
-node_modules/
-.env
-*.log
-**/obj/
-obj/
-*/desktop/obj/
-**/debug/
-debug/
-# Node
+# Dependencies
 node_modules/
 
 # Environment / secrets
@@ -15,12 +7,25 @@ node_modules/
 # Logs
 *.log
 
-# .NET build output (matches at any depth)
+# .NET build output (any depth) — Debug, Release, obj, WebView2 profile
 [Bb]in/
 [Oo]bj/
-desktop/[Bb]in/
-desktop/[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+*.WebView2/
 
 # Visual Studio / IDE
 .vs/
 *.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Test / coverage output
+coverage/
+*.trx
+
+# OS
+Thumbs.db
+.DS_Store

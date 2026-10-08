@@ -1,25 +1,20 @@
 {
   "$schema": "https://opencode.ai/config.json",
-
-  "model": "ollama/qwen3-coder:30b",
-
+  "model": "ollama/qwen3.8:27b",
   "provider": {
     "ollama": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "Ollama",
-
       "options": {
         "baseURL": "http://localhost:11434/v1"
       },
-
       "models": {
-        "qwen3-coder:30b": {
-          "name": "Qwen3 Coder 30B",
+        "qwen3.8:27b": {
+          "name": "Qwen 27B",
           "tools": true
         },
-
-        "qwen3-coder-32k:latest": {
-          "name": "Qwen3 Coder 32K",
+        "qwen3.8:27b  ": {
+          "name": "Qwen 27B",
           "tools": true
         }
       }

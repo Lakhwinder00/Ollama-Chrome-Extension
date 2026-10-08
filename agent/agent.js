@@ -189,9 +189,24 @@ async function runWebResearchFallback(messages, onEvent = () => {}) {
   const query = (userMessages.at(-1)?.content || '').trim() || 'latest facts and official sources';
   onEvent({ type: 'status', message: 'No answer from the model; checking web sources…' });
 
-  const search = await execute('web_search', { query });
+  let search;
+  try {
+    search = await execute('web_search', { query });
+  } catch (err) {
+    const message =
+      'I could not answer from local context, and the web search failed: ' +
+      String((err && err.message) || err);
+    onEvent({ type: 'assistant', content: message });
+    return { content: message, sources: [] };
+  }
   onEvent({ type: 'tool', name: 'web_search', arguments: { query } });
   onEvent({ type: 'tool_result', name: 'web_search', ok: true, summary: `search: ${search.query}`, detail: JSON.stringify(search.results.slice(0, 3), null, 2) });
+
+  if (!Array.isArray(search.results) || !search.results.length) {
+    const message = 'I could not answer reliably from local context, and the web search returned no results.';
+    onEvent({ type: 'assistant', content: message });
+    return { content: message, sources: [] };
+  }
 
   const sources = Array.isArray(search && search.results) ? search.results.slice(0, 3) : [];
   const snippets = [];
@@ -199,15 +214,20 @@ async function runWebResearchFallback(messages, onEvent = () => {}) {
     if (!result || !result.url) continue;
     try {
       const page = await execute('fetch_url', { url: result.url });
-      const text = String(page || '').slice(0, 1200).trim();
-      if (text) {
-        snippets.push({ title: result.title || result.url, url: result.url, text });
-      }
+      // fetch_url returns { url, content } — never String() the object itself.
+      const raw = page && typeof page === 'object' ? page.content : page;
+      const text = String(raw ?? '').slice(0, 1200).trim();
+      snippets.push({
+        title: result.title || result.url,
+        url: result.url,
+        text: text || String(result.snippet || '').trim() || 'No readable text on this page.',
+      });
     } catch (err) {
       snippets.push({
         title: result.title || result.url,
         url: result.url,
-        text: `Could not read page: ${String(err && err.message ? err.message : err)}`,
+        text: String(result.snippet || '').trim() ||
+          `Could not read page: ${String((err && err.message) || err)}`,
       });
     }
   }
@@ -217,6 +237,9 @@ async function runWebResearchFallback(messages, onEvent = () => {}) {
     : 'No web source could be read successfully.';
 
   const answer = `I could not answer reliably from local context, so I checked the web.\n\n${citeText}`;
+  // Clients (desktop, extension, CLI) only render what they receive as events —
+  // without this the web answer was returned to the caller but never shown.
+  onEvent({ type: 'assistant', content: answer });
   return { content: answer, sources };
 }
 

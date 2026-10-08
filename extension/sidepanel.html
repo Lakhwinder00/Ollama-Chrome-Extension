@@ -12,53 +12,92 @@
       <span class="logo">◮</span>
       <div class="brand-text">
         <h1>Local Code Agent</h1>
-        <span class="conn" id="conn">connecting…</span>
+        <p>Browser research agent</p>
       </div>
     </div>
-    <button id="settingsBtn" class="icon-btn" title="Settings">⚙</button>
+    <div class="conn success" id="conn">● connected</div>
+    <button id="settingsBtn" class="btn secondary" title="Settings">⚙</button>
   </header>
 
-  <section class="model-bar">
-    <label class="field">
-      <span>Model</span>
+  <section class="section model-bar">
+    <div class="control-group">
+      <span class="label">Model</span>
       <div class="model-row">
-        <select id="modelSelect" title="Ollama model"></select>
-        <button id="refreshModels" class="icon-btn" title="Refresh models">⟳</button>
+        <div class="select-wrapper">
+          <select id="modelSelect" title="Ollama model">
+            <option>Loading models…</option>
+          </select>
+        </div>
+        <button id="refreshModels" class="btn secondary" title="Refresh models">⟳</button>
       </div>
-    </label>
+    </div>
   </section>
 
-  <section id="settingsPanel" class="settings hidden">
-    <label class="field">
-      <span>Server URL</span>
-      <input id="serverUrl" type="text" placeholder="http://127.0.0.1:8787" />
-    </label>
-    <label class="field checkbox">
-      <input id="autoApprove" type="checkbox" />
-      <span>Auto-approve write &amp; run (unsafe)</span>
-    </label>
-    <label class="field checkbox">
-      <input id="includeTab" type="checkbox" checked />
-      <span>Read active tab into context</span>
-    </label>
+  <section id="settingsPanel" class="section settings hidden">
+    <div class="control-group">
+      <span class="label">Server URL</span>
+      <div class="input-row">
+        <input id="serverUrl" type="text" placeholder="http://127.0.0.1:8787" />
+      </div>
+    </div>
+    <div class="control-group">
+      <label class="checkbox">
+        <input id="autoApprove" type="checkbox" />
+        Auto-approve write & run (unsafe)
+      </label>
+    </div>
+    <div class="control-group">
+      <label class="checkbox">
+        <input id="includeTab" type="checkbox" checked />
+        Read active tab into context
+      </label>
+    </div>
   </section>
 
-  <section class="project-bar">
-    <label class="field">
-      <span>Project root</span>
-      <div class="project-row">
+  <section class="section project-bar">
+    <div class="control-group">
+      <span class="label">Project root</span>
+      <div class="input-row">
         <input id="projectRoot" type="text" placeholder="C:\path\to\your\project" />
-        <button id="setProject" class="link-btn">Set</button>
+        <button id="setProject" class="btn secondary">Set</button>
       </div>
-    </label>
+    </div>
   </section>
 
-  <section id="tabProfile" class="tab-profile" aria-live="polite">
+  <section class="section auto-bar">
+    <div class="control-group">
+      <span class="label">Auto features</span>
+      <div class="auto-row">
+        <label class="checkbox">
+          <input id="autoSearch" type="checkbox" checked />
+          Auto-search page content
+        </label>
+        <label class="checkbox">
+          <input id="findBestLink" type="checkbox" />
+          Find best link
+        </label>
+      </div>
+    </div>
+    <div class="control-group">
+      <span class="label">Auto prompt</span>
+      <label class="checkbox">
+        <input id="autoPrompt" type="checkbox" checked />
+        Auto-fill prompt with page context
+      </label>
+    </div>
+    <div class="control-group">
+      <span class="label">Research mode</span>
+      <select id="researchMode">
+        <option value="full">Full page research</option>
+        <option value="summary">Summary only</option>
+        <option value="links">Find and follow links</option>
+      </select>
+    </div>
+  </section>
+
+  <section class="section tab-profile" aria-live="polite">
     <div class="tab-profile-header">
       <span class="tab-badge">Active tab</span>
-    </div>
-    <div class="tab-profile-body">
-      <div class="tab-icon">◉</div>
       <div class="tab-info">
         <div id="tabTitle" class="tab-title">Loading…</div>
         <div id="tabUrl" class="tab-url">Waiting for browser tab</div>
@@ -69,12 +108,8 @@
   <main id="messages" class="messages"></main>
 
   <div class="chat-controls">
-    <button id="newChatBtn" class="control-btn" title="New chat">
-      <span>＋</span> New Chat
-    </button>
-    <button id="clearHistoryBtn" class="control-btn danger" title="Delete history">
-      <span>🗑</span> Clear History
-    </button>
+    <button id="newChatBtn" class="btn secondary" title="New chat">＋ New Chat</button>
+    <button id="clearHistoryBtn" class="btn secondary danger" title="Delete history">🗑 Clear History</button>
   </div>
 
   <section id="approval" class="approval hidden">
@@ -83,10 +118,10 @@
       <pre id="approvalArgs"></pre>
     </div>
     <div class="approval-actions">
-      <button id="approveBtn" class="btn approve" title="Allow this single call">Once</button>
-      <button id="sessionBtn" class="btn approve-session" title="Allow for this session">Session</button>
-      <button id="alwaysBtn" class="btn approve-always" title="Always allow (saved)">Always</button>
-      <button id="denyBtn" class="btn deny">Deny</button>
+      <button id="approveBtn" class="btn primary" title="Allow this single call">Once</button>
+      <button id="sessionBtn" class="btn primary approve-session" title="Allow for this session">Session</button>
+      <button id="alwaysBtn" class="btn primary approve-always" title="Always allow (saved)">Always</button>
+      <button id="denyBtn" class="btn danger" title="Deny">Deny</button>
     </div>
   </section>
 

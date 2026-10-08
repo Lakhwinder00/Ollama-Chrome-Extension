@@ -14,6 +14,7 @@ const {
   normalizeToolCalls,
   buildSystemPrompt,
   shouldRunWebResearch,
+  runAgent,
 } = require('../agent/agent');
 const { webSearch } = require('../agent/web');
 
@@ -104,4 +105,48 @@ test('buildSystemPrompt lists git_commit/git_checkout and stays model-agnostic',
   assert.match(p, /Operating system/);
   // The core must not assume a single model name.
   assert.doesNotMatch(p, /qwen/);
+});
+
+test('a model with no local answer streams the web fallback to the client', async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('duckduckgo')) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => `
+          <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fguide">Example Guide</a>
+          <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fguide">The official guide</a>`,
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '<html><head><title>Guide</title></head><body><p>Useful page text for the answer.</p></body></html>',
+    };
+  };
+
+  try {
+    const events = [];
+    const provider = { name: 'mock', chatStream: async () => ({ message: { content: '' }, streamedContent: false }) };
+    const result = await runAgent({
+      model: 'mock',
+      messages: [{ role: 'user', content: 'What is the guide?' }],
+      provider,
+      onEvent: (e) => events.push(e),
+    });
+
+    const assistant = events.filter((e) => e.type === 'assistant');
+    assert.equal(assistant.length, 1, 'the web answer must be emitted as an assistant event');
+    assert.match(assistant[0].content, /checked the web/);
+    assert.match(assistant[0].content, /https:\/\/example\.com\/guide/);
+    // fetch_url returns { url, content } — stringifying it produced "[object Object]".
+    assert.doesNotMatch(assistant[0].content, /\[object Object\]/);
+    assert.match(assistant[0].content, /Useful page text/);
+    assert.match(result.content, /checked the web/);
+    assert.ok(events.some((e) => e.type === 'tool' && e.name === 'web_search'));
+  } finally {
+    global.fetch = originalFetch;
+  }
 });

@@ -6,6 +6,8 @@
 const DEFAULT_SERVER = 'http://127.0.0.1:8787';
 const STORE_KEY = 'localCodeAgent';
 
+const trimAll = (s) => (s || '').replace(/^\s+|\s+$/g, '');
+
 const $ = (id) => document.getElementById(id);
 const messagesEl = $('messages');
 const inputEl = $('input');
@@ -19,6 +21,10 @@ let settings = {
   includeTab: true,
   projectRoot: '',
   sessionId: null,
+  autoSearch: true,
+  findBestLink: false,
+  autoPrompt: true,
+  researchMode: 'full',
 };
 let models = [];
 let transcript = [];
@@ -40,6 +46,10 @@ async function loadSettings() {
   $('autoApprove').checked = !!settings.autoApprove;
   $('includeTab').checked = settings.includeTab !== false;
   $('projectRoot').value = settings.projectRoot || '';
+  $('autoSearch').checked = settings.autoSearch !== false;
+  $('findBestLink').checked = settings.findBestLink || false;
+  $('autoPrompt').checked = settings.autoPrompt !== false;
+  $('researchMode').value = settings.researchMode || 'full';
   if (transcript.length) renderTranscript();
 }
 
@@ -440,12 +450,195 @@ function pageScroll(args) {
   return { direction: dir, amount, scrollYBefore: before };
 }
 
+function pageGetLinks() {
+  const nodes = document.querySelectorAll('a[href]');
+  const links = [];
+  for (const el of Array.from(nodes)) {
+    const href = el.getAttribute('href') || '';
+    const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+    if (text) {
+      links.push({
+        tag: el.tagName.toLowerCase(),
+        href,
+        text,
+      });
+    }
+  }
+  return { url: location.href, count: links.length, links };
+}
+
+function highlightElement(el, color = 'rgba(40,167,67,.4)') {
+  const box = document.createElement('div');
+  box.style.cssText =
+    'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #28a745;border-radius:4px;box-shadow:0 0 0 2px rgba(40,167,67,.4),0 0 14px rgba(40,167,67,.7);transition:all .12s ease;';
+  const place = () => {
+    const r = el.getBoundingClientRect();
+    box.style.left = r.left + 'px';
+    box.style.top = r.top + 'px';
+    box.style.width = r.width + 'px';
+    box.style.height = r.height + 'px';
+  };
+  place();
+  document.body.appendChild(box);
+  const onScroll = () => place();
+  window.addEventListener('scroll', onScroll, { passive: true });
+  setTimeout(() => { box.remove(); window.removeEventListener('scroll', onScroll); }, 2000);
+  return box;
+}
+
+function pageGetLinksWithIds() {
+  const nodes = document.querySelectorAll('a[href], button[onclick], input[type="submit"], input[type="button"]');
+  const elements = [];
+  for (const el of Array.from(nodes)) {
+    const href = el.getAttribute('href') || '';
+    const onclick = el.getAttribute('onclick') || '';
+    const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+    if (text || href) {
+      elements.push({
+        id: el.id || '',
+        tag: el.tagName.toLowerCase(),
+        href,
+        onclick,
+        text,
+        type: el.type || undefined,
+      });
+    }
+  }
+  return { url: location.href, count: elements.length, elements };
+}
+
+function pageFindBestLink(args) {
+  const keyword = String((args && args.keyword) || '').trim().toLowerCase();
+  const selector = args && args.selector;
+  let candidates = [];
+  if (selector) {
+    const el = document.querySelector(selector);
+    if (el) {
+      candidates = [{ el, text: (el.innerText || el.textContent || '').trim() }];
+    }
+  } else {
+    const nodes = document.querySelectorAll('a[href]');
+    for (const el of Array.from(nodes)) {
+      const t = ((el.innerText || el.textContent) || '').trim().toLowerCase();
+      if (t && t.includes(keyword)) {
+        candidates.push({
+          el,
+          text: t,
+          href: el.getAttribute('href') || '',
+        });
+      }
+    }
+  }
+  if (candidates.length === 0) {
+    throw new Error('No link matched keyword: ' + keyword);
+  }
+  // Sort by relevance: exact match first, then by longer text
+  candidates.sort((a, b) => {
+    const aLower = a.text.toLowerCase();
+    const bLower = b.text.toLowerCase();
+    if (aLower === keyword) return -1;
+    if (bLower === keyword) return 1;
+    return b.text.length - a.text.length;
+  });
+  const best = candidates[0];
+  highlightElement(best.el, 'rgba(40,167,67,.4)');
+  best.el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  try {
+    const box = document.createElement('div');
+    box.style.cssText =
+      'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #28a745;border-radius:4px;box-shadow:0 0 0 2px rgba(40,167,67,.35),0 0 14px rgba(40,167,67,.7);transition:all .12s ease;';
+    const place = () => {
+      const r = best.el.getBoundingClientRect();
+      box.style.left = r.left + 'px';
+      box.style.top = r.top + 'px';
+      box.style.width = r.width + 'px';
+      box.style.height = r.height + 'px';
+    };
+    place();
+    document.body.appendChild(box);
+    const onScroll = () => place();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    setTimeout(() => { box.remove(); window.removeEventListener('scroll', onScroll); }, 1500);
+  } catch (e) { /* highlight is best-effort */ }
+  best.el.click();
+  return {
+    clicked: true,
+    tag: best.el.tagName.toLowerCase(),
+    text: best.text,
+    href: best.href,
+  };
+}
+
+function pageTypeWithSelection(args) {
+  const text = String((args && args.text) || '').trim();
+  const selector = args && args.selector;
+  let el = null;
+  if (selector) {
+    el = document.querySelector(selector);
+  } else {
+    const needle = text.toLowerCase();
+    const fields = document.querySelectorAll('input, textarea, select');
+    for (const f of fields) {
+      const p = (f.placeholder || '').toLowerCase();
+      const n = (f.name || '').toLowerCase();
+      const a = (f.getAttribute('aria-label') || '').toLowerCase();
+      if (needle && (p.includes(needle) || n.includes(needle) || a.includes(needle))) {
+        el = f;
+        break;
+      }
+    }
+  }
+  if (!el) throw new Error('No input matched: ' + JSON.stringify(args));
+  el.focus();
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  try {
+    const box = document.createElement('div');
+    box.style.cssText =
+      'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #6c757d;border-radius:4px;box-shadow:0 0 0 2px rgba(108,117,125,.35),0 0 14px rgba(108,117,125,.7);transition:all .12s ease;';
+    const place = () => {
+      const r = el.getBoundingClientRect();
+      box.style.left = r.left + 'px';
+      box.style.top = r.top + 'px';
+      box.style.width = r.width + 'px';
+      box.style.height = r.height + 'px';
+    };
+    place();
+    document.body.appendChild(box);
+    const onScroll = () => place();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    setTimeout(() => { box.remove(); window.removeEventListener('scroll', onScroll); }, 1500);
+  } catch (e) { /* highlight is best-effort */ }
+  if (el instanceof HTMLSelectElement) {
+    el.value = text;
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return { typed: true, into: selector || 'search', value: text };
+  }
+  const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+  setter.call(el, text);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  return { typed: true, into: selector || 'search', value: text };
+}
+
+function pageScrollSmooth(args) {
+  const dir = (args && args.direction) || 'down';
+  const amount = (args && args.amount) || Math.round(window.innerHeight * 0.8);
+  const before = window.scrollY;
+  window.scrollBy({ top: dir === 'up' ? -amount : amount, behavior: 'smooth' });
+  return { direction: dir, amount, scrollYBefore: before };
+}
+
 const BROWSER_EXECUTORS = {
   get_page: pageGetPage,
   get_dom: pageGetDom,
   click: pageClick,
   type: pageType,
   scroll: pageScroll,
+  get_links: pageGetLinksWithIds,
+  find_best_link: pageFindBestLink,
+  type_with_selection: pageTypeWithSelection,
+  scroll_smooth: pageScrollSmooth,
 };
 
 function isRestrictedUrl(url) {
@@ -565,6 +758,24 @@ async function executeBrowserTool(name, args) {
   if (value && typeof value.then === 'function') value = await value;
   if (value !== undefined) return value;
   throw new Error(`No result from ${name}`);
+}
+
+async function executeBrowserToolWithRetry(name, args, maxRetries) {
+  let lastError = null;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await executeBrowserTool(name, args);
+    } catch (e) {
+      lastError = e;
+      if (i < maxRetries - 1) {
+        // Brief wait before retry
+        const waitTime = 200 * Math.pow(1.5, i);
+        appendStatus(`⏳ Retrying ${name} in ${waitTime}ms...`);
+        await new Promise((r) => setTimeout(r, waitTime));
+      }
+    }
+  }
+  throw lastError;
 }
 
 async function handleBrowserRequest(payload) {
@@ -723,16 +934,75 @@ async function sendMessage() {
   const ac = new AbortController();
   activeController = ac;
 
+  // Show research cursor on the page
+  try { document.body.style.cursor = 'progress'; } catch {}
+
   // Optionally read the active browser tab and attach it as context so the
   // agent can plan and act on the page step by step (like Claude).
   let outMessage = text;
   if (settings.includeTab !== false) {
-    appendStatus('🌐 Reading active tab…');
+    appendStatus('🌐 Reading page…');
     try {
-      const snap = await executeBrowserTool('get_page', { max_chars: 8000, max_scrolls: 2 });
+      const snap = await executeBrowserTool('get_page', { max_chars: 5000, max_scrolls: 1 });
       outMessage = buildTabContext(snap) + '\n\n' + text;
     } catch (e) {
-      appendStatus('⚠ Could not read active tab: ' + ((e && e.message) || e));
+      appendStatus('⚠ Could not read page: ' + ((e && e.message) || e));
+      outMessage = text;
+    }
+  }
+
+  // Always generate a proper prompt based on user input + page context,
+  // then search based on this generated prompt (not the raw user input).
+  const userPrompt = trimAll(text);
+  let searchPrompt = userPrompt || 'analyze this webpage and provide insights';
+
+  // Build the actual message prompt combining page context + user intent
+  if (settings.autoPrompt && settings.researchMode) {
+    appendStatus('🔍 Generating research prompt…');
+    try {
+      let pageContext = '';
+      if (settings.researchMode === 'full' || settings.researchMode === 'summary') {
+        const snap = await executeBrowserTool('get_page', { max_chars: 3000, max_scrolls: 1 });
+        pageContext = snap.text || '';
+        if (settings.researchMode === 'summary') {
+          const sentences = pageContext.split(/[.!?]+/).filter(s => s.trim().length > 10);
+          pageContext = sentences.slice(0, 3).join('. ') + '.';
+        }
+      }
+      if (settings.researchMode === 'links') {
+        const linksSnap = await executeBrowserTool('get_links');
+        const relevantLinks = linksSnap.links
+          .filter(l => l.text.length > 10)
+          .slice(0, 5)
+          .map(l => `${l.text}: ${l.href}`)
+          .join('\n');
+        pageContext = `Relevant links found on page:\n${relevantLinks}`;
+      }
+      // Generate proper prompt: combine page context with user's question
+      searchPrompt = `I'm on a webpage with this content:\n${pageContext}\n\nThe user asks: "${userPrompt}". Please provide a comprehensive analysis and answer their question.`;
+      outMessage = searchPrompt;
+    } catch (e) {
+      appendStatus('⚠ Prompt generation failed: ' + ((e && e.message) || e));
+      searchPrompt = userPrompt || 'analyze this webpage and provide insights';
+    }
+    outMessage = searchPrompt;
+  } else if (userPrompt && !settings.autoPrompt) {
+    // Auto-prompt disabled but user typed something - use their prompt
+    searchPrompt = userPrompt;
+    outMessage = searchPrompt;
+  }
+
+  // Perform search based on the generated prompt
+  if (searchPrompt && !outMessage.includes('google.com/search')) {
+    appendStatus('🔍 Searching with generated prompt…');
+    try {
+      await executeBrowserTool('search', { query: searchPrompt });
+      // After search, add search context and mark that search is done
+      outMessage = outMessage + '\n\n[Search performed based on your prompt: ' + searchPrompt + ']';
+      // Don't continue adding more search markers - the search is now part of the message context
+    } catch (e) {
+      appendStatus('⚠ Search failed: ' + ((e && e.message) || e));
+      outMessage = outMessage + '\n\n[Search failed: ' + (e && e.message || 'unknown error') + ']';
     }
   }
 
@@ -758,6 +1028,9 @@ async function sendMessage() {
     sendBtn.disabled = false;
     stopBtn.hidden = true;
     activeController = null;
+  } finally {
+    // Hide research cursor
+    try { document.body.style.cursor = ''; } catch {}
   }
 }
 
@@ -965,6 +1238,7 @@ function autoGrow() {
 
 // ---------------- wiring ----------------
 function init() {
+  // Settings initialized from storage
   refreshActiveTabProfile();
   if (chrome.tabs && chrome.tabs.onActivated) {
     chrome.tabs.onActivated.addListener(refreshActiveTabProfile);
@@ -1006,6 +1280,22 @@ function init() {
   });
   $('includeTab').addEventListener('change', (e) => {
     settings.includeTab = e.target.checked;
+    saveSettings();
+  });
+  $('autoSearch').addEventListener('change', (e) => {
+    settings.autoSearch = e.target.checked;
+    saveSettings();
+  });
+  $('findBestLink').addEventListener('change', (e) => {
+    settings.findBestLink = e.target.checked;
+    saveSettings();
+  });
+  $('autoPrompt').addEventListener('change', (e) => {
+    settings.autoPrompt = e.target.checked;
+    saveSettings();
+  });
+  $('researchMode').addEventListener('change', (e) => {
+    settings.researchMode = e.target.value;
     saveSettings();
   });
   $('refreshModels').addEventListener('click', loadModels);
