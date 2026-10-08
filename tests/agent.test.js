@@ -14,6 +14,7 @@ const {
   normalizeToolCalls,
   buildSystemPrompt,
   shouldRunWebResearch,
+  looksLikeManualInstructions,
   runAgent,
 } = require('../agent/agent');
 const { webSearch } = require('../agent/web');
@@ -149,4 +150,74 @@ test('a model with no local answer streams the web fallback to the client', asyn
   } finally {
     global.fetch = originalFetch;
   }
+});
+
+test('manual-instruction replies are detected, real answers are not', () => {
+  const instructive =
+    'Since I cannot directly edit your profile, you will need to make these changes yourself:\n' +
+    '1. Clicking "Edit" on your profile\n2. Updating the headline\n3. Editing the About section\n4. Adding new skills';
+  assert.equal(looksLikeManualInstructions(instructive), true);
+  assert.equal(looksLikeManualInstructions('The capital of France is Paris.'), false);
+  assert.equal(looksLikeManualInstructions("I don't know."), false);
+  assert.equal(looksLikeManualInstructions(''), false);
+});
+
+test('the model is nudged to act in the browser instead of instructing the user', async () => {
+  let calls = 0;
+  const provider = {
+    name: 'mock',
+    chatStream: async () => {
+      calls++;
+      if (calls === 1) {
+        return {
+          message: {
+            content:
+              'Since I cannot edit directly, you will need to do it yourself:\n' +
+              '1. Click Edit on your profile\n2. Update the headline\n3. Add the new skills',
+          },
+          streamedContent: false,
+        };
+      }
+      return { message: { content: 'Done — I updated the headline and added the skills.' }, streamedContent: false };
+    },
+  };
+  const events = [];
+  const result = await runAgent({
+    model: 'mock',
+    messages: [
+      {
+        role: 'user',
+        content:
+          '[Active browser tab]\nURL: https://example.com/in/me\n[/Active browser tab]\n\nUpdate my profile headline',
+      },
+    ],
+    provider,
+    requestBrowser: async () => ({ ok: true }),
+    onEvent: (e) => events.push(e),
+  });
+  assert.equal(calls, 2, 'the model must be asked again instead of showing the user manual steps');
+  assert.ok(events.some((e) => e.type === 'status' && /directly in the browser/i.test(e.message || '')));
+  assert.match(result.content, /Done/);
+});
+
+test('the browser nudge gives up after two attempts', async () => {
+  let calls = 0;
+  const instruct =
+    'I cannot edit it for you. You will need to do this yourself:\n' +
+    '1. Open your profile page\n2. Click the Edit button near the headline\n3. Type the new headline and save the section';
+  const provider = {
+    name: 'mock',
+    chatStream: async () => {
+      calls++;
+      return { message: { content: instruct }, streamedContent: false };
+    },
+  };
+  const result = await runAgent({
+    model: 'mock',
+    messages: [{ role: 'user', content: 'update my headline' }],
+    provider,
+    requestBrowser: async () => ({ ok: true }),
+  });
+  assert.equal(calls, 3, 'one attempt plus at most two nudges');
+  assert.match(result.content, /do this yourself/);
 });

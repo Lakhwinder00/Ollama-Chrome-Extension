@@ -55,23 +55,31 @@ function buildSystemPrompt() {
     '',
     "Browser tools (operate on the user's active Chrome tab):",
     "- get_page(max_chars?, max_scrolls?) — read the tab's URL, title, and full page text (auto-scrolls).",
-    '- get_dom(selector?, max_items?) — list clickable/fillable elements on the page.',
-    '- click(selector? or text?) — click an element on the page.',
+    '- get_dom(selector?, max_items?) — list page elements (links, buttons, fields, headings, text) on the page.',
+    '- click(selector? or text?) — click any element on the page.',
     '- type(selector? or text?, value) — type into a field on the page.',
+    '- edit_element(selector? or match?, text?/html?/value?/attribute?, attribute_value?) — update an existing element on the page.',
+    '- add_element(html? or text?, selector?, position?) — add new content to the page.',
+    '- delete_element(selector? or match?) — remove an element from the page.',
     '- scroll(direction?, amount?, selector?) — scroll the page or an element into view.',
     '- screenshot — capture the active tab as an image to verify the result.',
     '- navigate(url) — open a URL in the active tab.',
     '- search(query) — search Google and open the results.',
     '',
-    'When the user asks about the current page or the browser, use get_page or get_dom first.',
+    "When the user asks about the current page or the browser, use get_page or get_dom first.",
     "When the user refers to a page, profile, or website, read the active tab with get_page first. If it is not the right page, use search to find it on Google.",
-    'After clicking, typing, or scrolling, take a screenshot to verify what happened.',
+    'Decide yourself whether a search is needed: the extension never searches on its own. Call search only when the answer, page, or profile genuinely requires it (unknown or current information, or the right page is not open). If you can answer from the active tab or your knowledge, do not search.',
+    'Every browser action runs live in the user-visible active tab, and the user watches it happen step by step. Prefer a short, precise search query over a long prompt, and never search speculatively.',
+    'You may change the page itself when you judge it needs changing (fix or update text, add missing content, remove noise or popups): call edit_element/add_element/delete_element and act automatically without asking. Changes only affect the current tab and disappear on refresh, so be bold but purposeful — change what the task requires, then screenshot to verify.',
+    'You CAN edit live pages the user already has open — profiles, settings, forms, dashboards. For example, updating a profile means: click the Edit button, click each field, type the new text, click Save — all with your tools.',
+    'NEVER hand manual instructions back to the user ("click Edit yourself", "you need to update...", numbered how-to steps) while the relevant page is (or can be) open in the active tab. Do the steps yourself instead. Only fall back to written instructions if a tool genuinely failed and you show the error.',
+    'After clicking, typing, scrolling, or editing, take a screenshot to verify what happened.',
     '',
     'Browser task method (act on the active tab / a website, step by step like Claude):',
     '1. Understand the page first. If the message contains an "[Active browser tab ...]" block, use it; otherwise call get_page or get_dom.',
     '2. Before acting, write a short numbered plan: "Step 1: ...", "Step 2: ...", each naming the exact tool and target (selector/text/url).',
-    '3. Execute the plan one step at a time using the browser tools (click, type, navigate, scroll, search).',
-    '4. After each click/type/navigate, take a screenshot to verify. If it did not work, re-read the page (get_dom), revise the plan, and continue - never repeat the same failing action.',
+    '3. Execute the plan one step at a time using the browser tools (click, type, navigate, scroll, search, edit_element, add_element, delete_element).',
+    '4. After each click/type/navigate/edit, take a screenshot to verify. If it did not work, re-read the page (get_dom), revise the plan, and continue - never repeat the same failing action.',
     '5. When the goal is done, stop and briefly summarize the steps performed and the result.',
     '',
     'Rules:',
@@ -85,6 +93,7 @@ function buildSystemPrompt() {
     '8. Never repeat the same command or tool call. If something fails or returns nothing useful, stop and explain.',
     '9. If you do not know the answer or need current information, follow the research method: web_search, fetch_url, cross-check, then answer with citations. Do not make up facts.',
     '10. Investigate before asking: when the user asks about "my profile", "this page", or any real-world thing, use get_page or search first. Only ask the user for clarification if the tools do not help.',
+    '11. Act, do not instruct: never reply with manual steps the user could follow in the browser — perform them yourself with click/type/edit_element/add_element, then report what you changed.',
     '',
     'Research method (for factual or "latest" questions):',
     '1. Run several different web_search queries to gather diverse sources.',
@@ -182,6 +191,22 @@ function shouldRunWebResearch(content) {
     return /(i don['’]t know|not sure|unable to answer|cannot determine|can['’]t answer|not enough information|unknown|unsure)/i.test(text);
   }
   return /(i don['’]t know|not sure|unable to answer|cannot determine|can['’]t answer|not enough information|unknown|unsure|i do not know|i am not sure|i can['’]t tell)/i.test(text);
+}
+
+const MAX_BROWSER_NUDGES = 2;
+const ACT_DIRECTLY_PROMPT =
+  'Use your browser tools and do it yourself on the active tab right now — do not give me manual instructions. Read the page (get_page or get_dom), perform each step with click / type / edit_element / add_element, verify with screenshot, and only then summarize what you changed. If a tool genuinely fails, show the error and continue with the next step.';
+
+/** Detects a reply that hands manual browser steps back to the user instead of acting. */
+function looksLikeManualInstructions(content) {
+  const text = String(content || '').trim();
+  if (text.length < 80) return false;
+  const tellsUser =
+    /(you(?:'ll| will| can| should| need to| must| have to)|yourself|manually|on your own|follow these steps)/i.test(text);
+  const hasSteps = /^\s*(?:\d+[.)]|[-*]\s)/m.test(text);
+  const browserish =
+    /(click|type|edit|updat|add|remov|scroll|open|navigat|search|profile|page|section|button|field|form|headline|about|skill)/i.test(text);
+  return tellsUser && hasSteps && browserish;
 }
 
 async function runWebResearchFallback(messages, onEvent = () => {}) {
@@ -346,6 +371,7 @@ async function runAgent({
 }) {
   const history = ensureSystemMessage(messages);
   const recentCalls = [];
+  let browserNudges = 0;
   // Tool names already approved for this run (session scope or always-allow).
   const sessionAllowed = new Set(Array.isArray(preApproved) ? preApproved : []);
 
@@ -424,6 +450,16 @@ async function runAgent({
     });
 
     if (!toolCalls.length) {
+      if (
+        browserNudges < MAX_BROWSER_NUDGES &&
+        typeof requestBrowser === 'function' &&
+        looksLikeManualInstructions(content)
+      ) {
+        browserNudges++;
+        onEvent({ type: 'status', message: 'Asking the model to do it directly in the browser…' });
+        history.push({ role: 'user', content: ACT_DIRECTLY_PROMPT });
+        continue;
+      }
       if (shouldRunWebResearch(content)) {
         const fallback = await runWebResearchFallback(history, onEvent);
         history.push({ role: 'assistant', content: fallback.content });
@@ -509,4 +545,5 @@ module.exports = {
   parseToolCallsFromContent,
   normalizeToolCalls,
   shouldRunWebResearch,
+  looksLikeManualInstructions,
 };

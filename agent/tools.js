@@ -425,7 +425,19 @@ const TOOL_FUNCTIONS = {
 
 // Browser tools are declared here but executed by the Chrome extension: the
 // server routes the call to the extension, which runs it in the active tab.
-const BROWSER_TOOLS = new Set(['get_page', 'get_dom', 'click', 'type', 'scroll', 'screenshot', 'navigate', 'search']);
+const BROWSER_TOOLS = new Set([
+  'get_page',
+  'get_dom',
+  'click',
+  'type',
+  'scroll',
+  'screenshot',
+  'navigate',
+  'search',
+  'edit_element',
+  'add_element',
+  'delete_element',
+]);
 
 async function execute(name, args) {
   const fn = TOOL_FUNCTIONS[name];
@@ -662,7 +674,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'get_dom',
       description:
-        'List interactive elements (links, buttons, inputs) on the active tab, to find the right element to click or type into.',
+        'List elements on the active tab (links, buttons, fields, headings, paragraphs, list items, images) so you can find what to click, edit, or read.',
       parameters: {
         type: 'object',
         properties: {
@@ -677,7 +689,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'click',
       description:
-        'Click an element on the active browser tab, found by CSS selector or by matching visible text.',
+        'Click anywhere on the active browser tab — found by CSS selector or by matching visible text (links, buttons, tabs, menus, or any other element on the page).',
       parameters: {
         type: 'object',
         properties: {
@@ -707,6 +719,58 @@ const TOOL_DEFINITIONS = [
   {
     type: 'function',
     function: {
+      name: 'edit_element',
+      description:
+        'Update an existing element on the active page: change its text, inner HTML, form value, or an attribute. The change is applied immediately and the user sees it live in their tab (a refresh restores the original). Decide on your own when the page content needs changing — no approval needed.',
+      parameters: {
+        type: 'object',
+        properties: {
+          selector: { type: 'string', description: 'CSS selector of the element, e.g. "h1" or "#price".' },
+          match: { type: 'string', description: 'Visible text to locate the element instead of a selector (smallest matching element wins).' },
+          text: { type: 'string', description: 'New plain-text content for the element.' },
+          html: { type: 'string', description: 'New inner HTML for the element (non-form elements).' },
+          value: { type: 'string', description: 'New value for an input/textarea/select field.' },
+          attribute: { type: 'string', description: 'Attribute name to set, e.g. "class", "href", "src".' },
+          attribute_value: { type: 'string', description: 'Value for the attribute.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'add_element',
+      description:
+        'Add new content to the active page (insert HTML or plain text into/next to an element). The user sees it appear live in their tab; a refresh removes it. Use it to add missing content, notes, banners, or results to the page.',
+      parameters: {
+        type: 'object',
+        properties: {
+          html: { type: 'string', description: 'HTML to insert, e.g. "<p class=\'note\'>Found 3 matches</p>".' },
+          text: { type: 'string', description: 'Plain text to insert (HTML-escaped) if you do not want markup.' },
+          selector: { type: 'string', description: 'Target element CSS selector (default: body).' },
+          position: { type: 'string', enum: ['append', 'prepend', 'before', 'after'], description: 'Where to insert relative to the target (default append).' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_element',
+      description:
+        'Remove an element from the active page. The user sees it disappear live; a refresh restores it. Decide on your own when something on the page should go (noise, popups, banners).',
+      parameters: {
+        type: 'object',
+        properties: {
+          selector: { type: 'string', description: 'CSS selector of the element to remove.' },
+          match: { type: 'string', description: 'Visible text to locate the element instead of a selector.' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'scroll',
       description:
         'Scroll the active browser tab down or up (or scroll an element into view) so you can read more of the page before acting.',
@@ -725,7 +789,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'screenshot',
       description:
-        'Capture a screenshot of the currently active browser tab. Use this to verify what the page looks like after clicking or typing.',
+        'Capture a screenshot of the currently active browser tab. Use this to verify what the page looks like after clicking, typing, or editing it.',
       parameters: {
         type: 'object',
         properties: {},
@@ -753,7 +817,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'search',
       description:
-        'Search Google for a query (opens the results in the active tab). Use this when you do not know the answer; then use get_page to read the results.',
+        'Search Google for a query (the results open in the user-visible active tab). Call it only when you actually need fresh information or the right page/profile — nothing searches automatically. Then use get_page to read the results.',
       parameters: {
         type: 'object',
         properties: {

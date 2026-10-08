@@ -21,7 +21,7 @@ let settings = {
   includeTab: true,
   projectRoot: '',
   sessionId: null,
-  autoSearch: true,
+  autoSearchOnSend: false,
   findBestLink: false,
   autoPrompt: true,
   researchMode: 'full',
@@ -46,7 +46,7 @@ async function loadSettings() {
   $('autoApprove').checked = !!settings.autoApprove;
   $('includeTab').checked = settings.includeTab !== false;
   $('projectRoot').value = settings.projectRoot || '';
-  $('autoSearch').checked = settings.autoSearch !== false;
+  $('autoSearch').checked = !!settings.autoSearchOnSend;
   $('findBestLink').checked = settings.findBestLink || false;
   $('autoPrompt').checked = settings.autoPrompt !== false;
   $('researchMode').value = settings.researchMode || 'full';
@@ -324,7 +324,9 @@ function pageGetDom(args) {
   const maxItems = (args && args.max_items) || 100;
   const nodes = selector
     ? document.querySelectorAll(selector)
-    : document.querySelectorAll('a, button, input, textarea, select, [role="button"], [onclick]');
+    : document.querySelectorAll(
+        'a, button, input, textarea, select, [role="button"], [onclick], h1, h2, h3, h4, p, li, td, img, [contenteditable="true"]'
+      );
   const elements = [];
   for (const el of Array.from(nodes)) {
     if (elements.length >= maxItems) break;
@@ -351,13 +353,28 @@ function pageClick(args) {
   if (args.selector) {
     el = document.querySelector(args.selector);
   } else if (args.text) {
-    const needle = String(args.text).toLowerCase();
-    const all = document.querySelectorAll(
-      'a, button, [role="button"], input[type="submit"], input[type="button"], label'
+    const needle = String(args.text).toLowerCase().trim();
+    const interactive = document.querySelectorAll(
+      'a, button, [role="button"], input[type="submit"], input[type="button"], label, summary, [onclick], [tabindex]'
     );
-    for (const e of all) {
+    for (const e of interactive) {
       const t = ((e.innerText || e.textContent || e.value) || '').trim().toLowerCase();
       if (t && t.includes(needle)) { el = e; break; }
+    }
+    if (!el) {
+      let best = null;
+      let bestLen = Infinity;
+      for (const e of document.querySelectorAll('body *')) {
+        const rect = e.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        const t = ((e.innerText || e.textContent) || '').trim();
+        if (!t || t.length > 300) continue;
+        if (t.toLowerCase().includes(needle) && t.length < bestLen) {
+          best = e;
+          bestLen = t.length;
+        }
+      }
+      el = best;
     }
   }
   if (!el) throw new Error('No element matched: ' + JSON.stringify(args));
@@ -629,6 +646,271 @@ function pageScrollSmooth(args) {
   return { direction: dir, amount, scrollYBefore: before };
 }
 
+function pageSearchOnPage(args) {
+  const q = String((args && args.query) || '').trim();
+  if (!q) throw new Error('search_on_page requires a query.');
+  const field =
+    document.querySelector('textarea[name="q"]') ||
+    document.querySelector('input[name="q"]') ||
+    document.querySelector('textarea[aria-label="Search"]') ||
+    document.querySelector('input[aria-label="Search"]');
+  if (!field) throw new Error('No search field found on this page.');
+  const startHref = location.href;
+  field.focus();
+  field.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  try {
+    const box = document.createElement('div');
+    box.style.cssText =
+      'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #d97757;border-radius:4px;box-shadow:0 0 0 2px rgba(217,119,87,.35),0 0 14px rgba(217,119,87,.7);transition:all .12s ease;';
+    const place = () => {
+      const r = field.getBoundingClientRect();
+      box.style.left = r.left + 'px';
+      box.style.top = r.top + 'px';
+      box.style.width = r.width + 'px';
+      box.style.height = r.height + 'px';
+    };
+    place();
+    document.body.appendChild(box);
+    const onScroll = () => place();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    setTimeout(() => {
+      box.remove();
+      window.removeEventListener('scroll', onScroll);
+    }, 4000);
+  } catch (e) { /* highlight is best-effort */ }
+  try {
+    const pointer = document.createElement('div');
+    pointer.style.cssText =
+      'position:fixed;left:0;top:0;z-index:2147483647;pointer-events:none;transition:transform .7s cubic-bezier(.2,.8,.2,1);filter:drop-shadow(0 2px 5px rgba(0,0,0,.45));';
+    pointer.innerHTML =
+      '<svg width="26" height="26" viewBox="0 0 24 24"><path d="M4 2 L20 12 L12 13 L9 21 Z" fill="#1f1f1f" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+    document.body.appendChild(pointer);
+    pointer.style.transform = `translate(${window.innerWidth - 70}px, ${window.innerHeight - 70}px)`;
+    const target = field.getBoundingClientRect();
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        pointer.style.transform = `translate(${target.left + 10}px, ${target.top + target.height / 2}px)`;
+      })
+    );
+    setTimeout(() => pointer.remove(), 3500);
+  } catch (e) { /* pointer is best-effort */ }
+  const proto = field instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+  const setValue = (v) => {
+    setter.call(field, v);
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  return (async () => {
+    const inc = Math.max(1, Math.ceil(q.length / 24));
+    for (let i = inc; i < q.length; i += inc) {
+      setValue(q.slice(0, i));
+      await new Promise((r) => setTimeout(r, 45));
+    }
+    setValue(q);
+    field.dispatchEvent(new Event('change', { bubbles: true }));
+    ['keydown', 'keypress', 'keyup'].forEach((type) => {
+      field.dispatchEvent(
+        new KeyboardEvent(type, {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    });
+    setTimeout(() => {
+      if (location.href !== startHref) return;
+      try {
+        if (field.form && typeof field.form.requestSubmit === 'function') field.form.requestSubmit();
+      } catch (e) { /* ignore */ }
+    }, 800);
+    return { submitted: true, query: q };
+  })();
+}
+
+function pageEditElement(args) {
+  const a = args || {};
+  let el = null;
+  if (a.selector) el = document.querySelector(a.selector);
+  if (!el && a.match) {
+    const needle = String(a.match).toLowerCase().trim();
+    let best = null;
+    let bestLen = Infinity;
+    for (const e of document.querySelectorAll('body *')) {
+      const rect = e.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      const t = ((e.innerText || e.textContent) || '').trim();
+      if (!t || t.length > 300) continue;
+      if (t.toLowerCase().includes(needle) && t.length < bestLen) {
+        best = e;
+        bestLen = t.length;
+      }
+    }
+    el = best;
+  }
+  if (!el) throw new Error('edit_element: no element matched ' + JSON.stringify({ selector: a.selector, match: a.match }));
+  const isField =
+    el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement;
+  let mode;
+  if (a.value !== undefined && isField) mode = 'value';
+  else if (a.text !== undefined) mode = isField ? 'value' : 'text';
+  else if (a.html !== undefined && !isField) mode = 'html';
+  else if (a.value !== undefined) mode = 'text';
+  else if (a.html !== undefined) mode = 'html';
+  else if (a.attribute !== undefined) mode = 'attribute';
+  else throw new Error('edit_element requires one of: text, html, value, or attribute.');
+  const before = ((el.innerText || el.textContent || el.value) || '').trim().slice(0, 200);
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  if (mode === 'value') {
+    if (el instanceof HTMLSelectElement) {
+      el.value = String(a.value !== undefined ? a.value : a.text);
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, String(a.value !== undefined ? a.value : a.text));
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+  } else if (mode === 'text') {
+    el.textContent = String(a.text !== undefined ? a.text : a.value);
+  } else if (mode === 'html') {
+    el.innerHTML = String(a.html);
+  } else {
+    el.setAttribute(String(a.attribute), String(a.attribute_value !== undefined ? a.attribute_value : ''));
+  }
+  try {
+    const box = document.createElement('div');
+    box.style.cssText =
+      'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #d97757;border-radius:4px;box-shadow:0 0 0 2px rgba(217,119,87,.35),0 0 14px rgba(217,119,87,.7);transition:all .12s ease;';
+    const place = () => {
+      const r = el.getBoundingClientRect();
+      box.style.left = r.left + 'px';
+      box.style.top = r.top + 'px';
+      box.style.width = r.width + 'px';
+      box.style.height = r.height + 'px';
+    };
+    place();
+    document.body.appendChild(box);
+    const onScroll = () => place();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    setTimeout(() => {
+      box.remove();
+      window.removeEventListener('scroll', onScroll);
+    }, 2500);
+  } catch (e) { /* highlight is best-effort */ }
+  const after = ((el.innerText || el.textContent || el.value) || '').trim().slice(0, 200);
+  return {
+    updated: true,
+    mode,
+    tag: el.tagName.toLowerCase(),
+    before,
+    after,
+    attribute: mode === 'attribute' ? String(a.attribute) : undefined,
+  };
+}
+
+function pageAddElement(args) {
+  const a = args || {};
+  let html = a.html !== undefined ? String(a.html) : '';
+  if (html === '' && a.text !== undefined) {
+    html = String(a.text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+  if (!html.trim()) throw new Error('add_element requires html or text.');
+  const position = ['append', 'prepend', 'before', 'after'].includes(a.position) ? a.position : 'append';
+  let anchor = a.selector ? document.querySelector(a.selector) : null;
+  if (!anchor) {
+    if (a.selector) throw new Error('add_element: no element matched selector ' + JSON.stringify(a.selector));
+    anchor = document.body;
+  }
+  let target = position;
+  if ((position === 'before' || position === 'after') && !anchor.parentNode) target = 'append';
+  const holder = document.createElement('div');
+  holder.innerHTML = html;
+  const firstEl = holder.firstElementChild;
+  const fragment = document.createDocumentFragment();
+  while (holder.firstChild) fragment.appendChild(holder.firstChild);
+  const count = fragment.childNodes.length;
+  if (target === 'prepend') anchor.insertBefore(fragment, anchor.firstChild);
+  else if (target === 'before') anchor.parentNode.insertBefore(fragment, anchor);
+  else if (target === 'after') anchor.parentNode.insertBefore(fragment, anchor.nextSibling);
+  else anchor.appendChild(fragment);
+  if (firstEl) {
+    try {
+      firstEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      const box = document.createElement('div');
+      box.style.cssText =
+        'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #28a745;border-radius:4px;box-shadow:0 0 0 2px rgba(40,167,67,.35),0 0 14px rgba(40,167,67,.7);transition:all .12s ease;';
+      const place = () => {
+        const r = firstEl.getBoundingClientRect();
+        box.style.left = r.left + 'px';
+        box.style.top = r.top + 'px';
+        box.style.width = r.width + 'px';
+        box.style.height = r.height + 'px';
+      };
+      place();
+      document.body.appendChild(box);
+      const onScroll = () => place();
+      window.addEventListener('scroll', onScroll, { passive: true });
+      setTimeout(() => {
+        box.remove();
+        window.removeEventListener('scroll', onScroll);
+      }, 2500);
+    } catch (e) { /* highlight is best-effort */ }
+  }
+  return {
+    added: true,
+    count,
+    position: target,
+    target: a.selector || 'body',
+    tag: firstEl && firstEl.nodeType === 1 ? firstEl.tagName.toLowerCase() : undefined,
+    preview: html.slice(0, 200),
+  };
+}
+
+function pageDeleteElement(args) {
+  const a = args || {};
+  let el = null;
+  if (a.selector) el = document.querySelector(a.selector);
+  if (!el && a.match) {
+    const needle = String(a.match).toLowerCase().trim();
+    let best = null;
+    let bestLen = Infinity;
+    for (const e of document.querySelectorAll('body *')) {
+      const rect = e.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      const t = ((e.innerText || e.textContent) || '').trim();
+      if (!t || t.length > 300) continue;
+      if (t.toLowerCase().includes(needle) && t.length < bestLen) {
+        best = e;
+        bestLen = t.length;
+      }
+    }
+    el = best;
+  }
+  if (!el) throw new Error('delete_element: no element matched ' + JSON.stringify({ selector: a.selector, match: a.match }));
+  const info = {
+    deleted: true,
+    tag: el.tagName.toLowerCase(),
+    text: ((el.innerText || el.textContent) || '').trim().slice(0, 120),
+  };
+  try {
+    const r = el.getBoundingClientRect();
+    const box = document.createElement('div');
+    box.style.cssText =
+      'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #dc3545;border-radius:4px;box-shadow:0 0 0 2px rgba(220,53,69,.35),0 0 14px rgba(220,53,69,.7);left:' +
+      r.left + 'px;top:' + r.top + 'px;width:' + r.width + 'px;height:' + r.height + 'px;';
+    document.body.appendChild(box);
+    setTimeout(() => box.remove(), 1500);
+  } catch (e) { /* highlight is best-effort */ }
+  el.remove();
+  return info;
+}
+
 const BROWSER_EXECUTORS = {
   get_page: pageGetPage,
   get_dom: pageGetDom,
@@ -639,6 +921,10 @@ const BROWSER_EXECUTORS = {
   find_best_link: pageFindBestLink,
   type_with_selection: pageTypeWithSelection,
   scroll_smooth: pageScrollSmooth,
+  search_on_page: pageSearchOnPage,
+  edit_element: pageEditElement,
+  add_element: pageAddElement,
+  delete_element: pageDeleteElement,
 };
 
 function isRestrictedUrl(url) {
@@ -696,6 +982,48 @@ function normalizeUrl(rawUrl) {
   return url;
 }
 
+function hostnameOf(rawUrl) {
+  try {
+    return new URL(String(rawUrl || '')).hostname;
+  } catch {
+    return '';
+  }
+}
+
+async function waitForUrlChange(tabId, ms) {
+  let before;
+  try {
+    before = (await chrome.tabs.get(tabId)).url;
+  } catch {
+    return null;
+  }
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 150));
+    try {
+      const t = await chrome.tabs.get(tabId);
+      if (t && t.url && t.url !== before) return t.url;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+async function waitForTabComplete(tabId, ms) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    try {
+      const t = await chrome.tabs.get(tabId);
+      if (t && t.status === 'complete') return true;
+    } catch {
+      return false;
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+
 async function navigateTab(args) {
   const url = normalizeUrl(args && args.url);
   const tab = await getActiveTab();
@@ -717,6 +1045,22 @@ async function navigateTab(args) {
 async function searchWeb(args) {
   const q = String((args && args.query) || '').trim();
   if (!q) throw new Error('search requires a query.');
+  const tab = await getActiveTab();
+  const host = hostnameOf(tab.url);
+  if (!isRestrictedUrl(tab.url) && /(^|\.)google\./i.test(host)) {
+    try {
+      const r = await executeBrowserTool('search_on_page', { query: q });
+      if (r && r.submitted) {
+        const changed = await waitForUrlChange(tab.id, 3500);
+        if (changed) {
+          await waitForTabComplete(tab.id, 10000);
+          return { query: q, typedIntoSearch: true, navigatedTo: changed };
+        }
+      }
+    } catch (e) {
+      // no search field or submit did not navigate — fall back to a plain URL search
+    }
+  }
   return navigateTab({ url: 'https://www.google.com/search?q=' + encodeURIComponent(q) });
 }
 
@@ -778,10 +1122,42 @@ async function executeBrowserToolWithRetry(name, args, maxRetries) {
   throw lastError;
 }
 
+function browserToolStatus(name, args) {
+  const a = args || {};
+  switch (name) {
+    case 'search':
+      return '🔍 Searching Google: "' + String(a.query || '').slice(0, 90) + '"';
+    case 'search_on_page':
+      return '🔍 Filling the search box on the page…';
+    case 'navigate':
+      return '🌐 Opening ' + String(a.url || '');
+    case 'click':
+      return '🌐 Clicking ' + (a.text || a.selector || 'the target');
+    case 'type':
+      return '🌐 Typing into ' + (a.selector || a.text || 'the field');
+    case 'get_page':
+      return '🌐 Reading the active tab…';
+    case 'get_dom':
+      return '🌐 Inspecting the page…';
+    case 'screenshot':
+      return '🌐 Capturing a screenshot…';
+    case 'scroll':
+      return '🌐 Scrolling the page…';
+    case 'edit_element':
+      return '🌐 Updating ' + (a.selector || a.match || 'page element');
+    case 'add_element':
+      return '🌐 Adding content to ' + (a.selector || 'the page');
+    case 'delete_element':
+      return '🌐 Removing ' + (a.selector || a.match || 'page element');
+    default:
+      return '🌐 ' + name + ' on active tab';
+  }
+}
+
 async function handleBrowserRequest(payload) {
   const { id, name, arguments: args } = payload;
   const base = settings.serverUrl || DEFAULT_SERVER;
-  appendStatus('🌐 ' + name + ' on active tab');
+  appendStatus(browserToolStatus(name, args));
   try {
     const result = await executeBrowserTool(name, args);
     await fetch(`${base}/browser/result`, {
@@ -913,7 +1289,7 @@ async function readStream(body) {
 function buildTabContext(snap) {
   const s = snap || {};
   return [
-    '[Active browser tab — captured by the extension]',
+    '[Active browser tab — captured by the extension. This page is open in front of the user right now, so act on it directly with the browser tools (click, type, edit_element, add_element) instead of telling the user to do things manually.]',
     'URL: ' + (s.url || ''),
     'Title: ' + (s.title || ''),
     '---',
@@ -951,8 +1327,9 @@ async function sendMessage() {
     }
   }
 
-  // Always generate a proper prompt based on user input + page context,
-  // then search based on this generated prompt (not the raw user input).
+  // Generate a prompt from user input + page context. Searching Google with
+  // it is opt-in (autoSearchOnSend) — by default the model decides if and
+  // when a search is needed and runs it itself, visible in the active tab.
   const userPrompt = trimAll(text);
   let searchPrompt = userPrompt || 'analyze this webpage and provide insights';
 
@@ -992,14 +1369,11 @@ async function sendMessage() {
     outMessage = searchPrompt;
   }
 
-  // Perform search based on the generated prompt
-  if (searchPrompt && !outMessage.includes('google.com/search')) {
+  if (settings.autoSearchOnSend && searchPrompt && !outMessage.includes('google.com/search')) {
     appendStatus('🔍 Searching with generated prompt…');
     try {
       await executeBrowserTool('search', { query: searchPrompt });
-      // After search, add search context and mark that search is done
       outMessage = outMessage + '\n\n[Search performed based on your prompt: ' + searchPrompt + ']';
-      // Don't continue adding more search markers - the search is now part of the message context
     } catch (e) {
       appendStatus('⚠ Search failed: ' + ((e && e.message) || e));
       outMessage = outMessage + '\n\n[Search failed: ' + (e && e.message || 'unknown error') + ']';
@@ -1317,7 +1691,7 @@ function init() {
     saveSettings();
   });
   $('autoSearch').addEventListener('change', (e) => {
-    settings.autoSearch = e.target.checked;
+    settings.autoSearchOnSend = e.target.checked;
     saveSettings();
   });
   $('findBestLink').addEventListener('change', (e) => {
