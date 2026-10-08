@@ -1062,16 +1062,16 @@ async function checkHealth() {
     const data = await res.json();
     const connEl = $('conn');
     if (data.ok) {
-      connEl.textContent = '● connected';
+      connEl.textContent = 'connected';
       connEl.className = 'conn ok';
       loadModels(); // Load models when server is up
     } else {
-      connEl.textContent = '● ollama unreachable';
+      connEl.textContent = 'ollama unreachable';
       connEl.className = 'conn err';
     }
   } catch (e) {
     const connEl = $('conn');
-    connEl.textContent = '● server offline';
+    connEl.textContent = 'server offline';
     connEl.className = 'conn err';
   }
 }
@@ -1121,7 +1121,7 @@ async function loadModels() {
     } else {
       // If no models are found, show error message in UI
       const connEl = $('conn');
-      connEl.textContent = '● server online (no models)';
+      connEl.textContent = 'online · no models';
       connEl.className = 'conn err';
       
       // Try to prompt user to check Ollama
@@ -1129,7 +1129,7 @@ async function loadModels() {
     }
   } catch (e) {
     const connEl = $('conn');
-    connEl.textContent = '● server offline';
+    connEl.textContent = 'server offline';
     connEl.className = 'conn err';
     // Provide troubleshooting message
     appendStatus('✖ Could not connect to Ollama server. Make sure Ollama is running at ' + 
@@ -1194,6 +1194,7 @@ async function applyProject(root) {
 }
 
 async function refreshActiveTabProfile() {
+  const favEl = $('tabFavicon');
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const titleEl = $('tabTitle');
@@ -1201,16 +1202,42 @@ async function refreshActiveTabProfile() {
     if (!tab) {
       titleEl.textContent = 'No active tab';
       urlEl.textContent = 'Open a page to enable context';
+      favEl.classList.add('hidden');
       return;
     }
     const title = (tab.title || 'Untitled page').trim() || 'Untitled page';
     const url = (tab.url || 'chrome://newtab').trim() || 'chrome://newtab';
     titleEl.textContent = title;
     urlEl.textContent = url;
+    updateTabFavicon(tab, url);
   } catch (e) {
     $('tabTitle').textContent = 'Active tab unavailable';
     $('tabUrl').textContent = 'Tab metadata could not be loaded';
+    $('tabFavicon').classList.add('hidden');
   }
+}
+
+function updateTabFavicon(tab, url) {
+  const favEl = $('tabFavicon');
+  if (!favEl) return;
+  let host = '';
+  try {
+    host = new URL(url).hostname;
+  } catch (e) {
+    host = '';
+  }
+  const fallback = host ? `https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(host)}` : '';
+  const src = (tab && tab.favIconUrl) || fallback;
+  if (!src) {
+    favEl.classList.add('hidden');
+    return;
+  }
+  favEl.onerror = () => {
+    if (fallback && !favEl.src.includes('s2/favicons')) favEl.src = fallback;
+    else favEl.classList.add('hidden');
+  };
+  favEl.classList.remove('hidden');
+  favEl.src = src;
 }
 
 function clearHistory() {
@@ -1257,9 +1284,16 @@ function init() {
   $('newChatBtn').addEventListener('click', newChat);
   $('clearHistoryBtn').addEventListener('click', deleteHistory);
   $('stopBtn').addEventListener('click', stopRun);
-  $('settingsBtn').addEventListener('click', () =>
-    $('settingsPanel').classList.toggle('hidden')
-  );
+  $('settingsBtn').addEventListener('click', () => {
+    const open = !$('settingsPanel').classList.toggle('hidden');
+    $('settingsBtn').classList.toggle('active', open);
+  });
+  $('setupBtn').addEventListener('click', () => {
+    const collapsed = $('setupBlock').classList.toggle('collapsed');
+    $('setupBtn').textContent = collapsed ? '▸' : '⌄';
+    $('setupBtn').setAttribute('aria-expanded', String(!collapsed));
+    $('setupBtn').classList.toggle('active', collapsed);
+  });
   $('setProject').addEventListener('click', setProject);
   $('projectRoot').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') setProject();

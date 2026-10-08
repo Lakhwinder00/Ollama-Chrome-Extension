@@ -15,12 +15,14 @@
         <p>Browser research agent</p>
       </div>
     </div>
-    <div class="conn success" id="conn">● connected</div>
-    <button id="settingsBtn" class="btn secondary" title="Settings">⚙</button>
+    <div class="conn success" id="conn">connected</div>
+    <button id="setupBtn" class="btn secondary icon" title="Show or hide setup options" aria-label="Show or hide setup options" aria-expanded="true">⌄</button>
+    <button id="settingsBtn" class="btn secondary icon" title="Settings" aria-label="Settings">⚙</button>
   </header>
 
+  <div class="controls" id="setupBlock">
   <section class="section model-bar">
-    <div class="control-group">
+    <div class="control-group row">
       <span class="label">Model</span>
       <div class="model-row">
         <div class="select-wrapper">
@@ -28,7 +30,7 @@
             <option>Loading models…</option>
           </select>
         </div>
-        <button id="refreshModels" class="btn secondary" title="Refresh models">⟳</button>
+        <button id="refreshModels" class="btn secondary icon" title="Refresh models" aria-label="Refresh models">⟳</button>
       </div>
     </div>
   </section>
@@ -55,8 +57,8 @@
   </section>
 
   <section class="section project-bar">
-    <div class="control-group">
-      <span class="label">Project root</span>
+    <div class="control-group row">
+      <span class="label">Project</span>
       <div class="input-row">
         <input id="projectRoot" type="text" placeholder="C:\path\to\your\project" />
         <button id="setProject" class="btn secondary">Set</button>
@@ -76,17 +78,14 @@
           <input id="findBestLink" type="checkbox" />
           Find best link
         </label>
+        <label class="checkbox">
+          <input id="autoPrompt" type="checkbox" checked />
+          Auto-fill prompt with page context
+        </label>
       </div>
     </div>
-    <div class="control-group">
-      <span class="label">Auto prompt</span>
-      <label class="checkbox">
-        <input id="autoPrompt" type="checkbox" checked />
-        Auto-fill prompt with page context
-      </label>
-    </div>
-    <div class="control-group">
-      <span class="label">Research mode</span>
+    <div class="control-group row">
+      <span class="label">Research</span>
       <select id="researchMode">
         <option value="full">Full page research</option>
         <option value="summary">Summary only</option>
@@ -97,6 +96,7 @@
 
   <section class="section tab-profile" aria-live="polite">
     <div class="tab-profile-header">
+      <img id="tabFavicon" class="tab-favicon hidden" alt="" />
       <span class="tab-badge">Active tab</span>
       <div class="tab-info">
         <div id="tabTitle" class="tab-title">Loading…</div>
@@ -104,6 +104,7 @@
       </div>
     </div>
   </section>
+  </div>
 
   <main id="messages" class="messages"></main>
 
@@ -126,7 +127,7 @@
   </section>
 
   <footer class="composer">
-    <textarea id="input" rows="1" placeholder="Ask something…"></textarea>
+    <textarea id="input" rows="1" placeholder="Ask anything…  ⏎ send"></textarea>
     <div class="composer-actions">
       <button id="stopBtn" class="send-btn stop" title="Stop" hidden>■</button>
       <button id="send" class="send-btn">➤</button>
