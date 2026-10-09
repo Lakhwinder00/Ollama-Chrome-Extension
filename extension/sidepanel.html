@@ -16,101 +16,131 @@
       </div>
     </div>
     <div class="conn success" id="conn">connected</div>
-    <button id="setupBtn" class="btn secondary icon" title="Show or hide setup options" aria-label="Show or hide setup options" aria-expanded="true">⌄</button>
-    <button id="settingsBtn" class="btn secondary icon" title="Settings" aria-label="Settings">⚙</button>
+    <button id="newChatBtn" class="btn secondary icon" title="New chat" aria-label="New chat">＋</button>
+    <button id="settingsBtn" class="btn secondary icon" title="Server settings" aria-label="Server settings" aria-expanded="false">⚙</button>
   </header>
 
+  <div class="statusbar" role="status" aria-live="polite">
+    <button type="button" class="status-chip model-chip" id="statusModel" title="Choose the model">…</button>
+    <span class="status-chip gen" id="genStatus" data-state="idle">Ready</span>
+    <span class="status-chip time" id="responseTime" title="Response time for the last run">—</span>
+  </div>
+
+  <!-- Settings live in collapsible sections so the conversation stays on top. -->
   <div class="controls" id="setupBlock">
-  <section class="section model-bar">
-    <div class="control-group row">
-      <span class="label">Model</span>
-      <div class="model-row">
-        <div class="select-wrapper">
-          <select id="modelSelect" title="Ollama model">
-            <option>Loading models…</option>
+    <details class="section collapse" id="modelSection">
+      <summary>
+        <span class="summary-title">Model</span>
+        <span class="summary-value" id="modelSummary">loading…</span>
+      </summary>
+      <div class="section-body">
+        <div class="model-row">
+          <div class="select-wrapper">
+            <select id="modelSelect" title="Ollama model">
+              <option>Loading models…</option>
+            </select>
+          </div>
+          <button id="refreshModels" class="btn secondary icon" title="Refresh models" aria-label="Refresh models">⟳</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="section collapse" id="tabSection">
+      <summary>
+        <span class="summary-title">Context</span>
+        <span class="summary-value" id="tabSummary">Waiting for browser tab</span>
+      </summary>
+      <div class="section-body">
+        <div class="tab-profile" aria-live="polite">
+          <img id="tabFavicon" class="tab-favicon hidden" alt="" />
+          <span class="tab-badge">Active tab</span>
+          <div class="tab-info">
+            <div id="tabTitle" class="tab-title">Loading…</div>
+            <div id="tabUrl" class="tab-url">Waiting for browser tab</div>
+          </div>
+        </div>
+        <label class="checkbox">
+          <input id="includeTab" type="checkbox" checked />
+          Read active tab into context
+        </label>
+      </div>
+    </details>
+
+    <details class="section collapse" id="projectSection">
+      <summary>
+        <span class="summary-title">Project</span>
+        <span class="summary-value" id="projectSummary">Not set</span>
+      </summary>
+      <div class="section-body">
+        <div class="input-row">
+          <input id="projectRoot" type="text" placeholder="C:\path\to\your\project" />
+          <button id="setProject" class="btn secondary">Set</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="section collapse" id="autoSection">
+      <summary>
+        <span class="summary-title">Automation</span>
+        <span class="summary-value" id="autoSummary">off</span>
+      </summary>
+      <div class="section-body">
+        <div class="control-group">
+          <div class="auto-row">
+            <label class="checkbox">
+              <input id="autoSearch" type="checkbox" />
+              Auto-search Google with my prompt
+            </label>
+            <label class="checkbox">
+              <input id="findBestLink" type="checkbox" />
+              Find best link
+            </label>
+            <label class="checkbox">
+              <input id="autoPrompt" type="checkbox" checked />
+              Auto-fill prompt with page context
+            </label>
+          </div>
+        </div>
+        <div class="control-group">
+          <span class="label">Research</span>
+          <select id="researchMode">
+            <option value="full">Full page research</option>
+            <option value="summary">Summary only</option>
+            <option value="links">Find and follow links</option>
           </select>
         </div>
-        <button id="refreshModels" class="btn secondary icon" title="Refresh models" aria-label="Refresh models">⟳</button>
       </div>
-    </div>
-  </section>
+    </details>
 
-  <section id="settingsPanel" class="section settings hidden">
-    <div class="control-group">
-      <span class="label">Server URL</span>
-      <div class="input-row">
-        <input id="serverUrl" type="text" placeholder="http://127.0.0.1:8787" />
+    <details class="section collapse" id="settingsPanel">
+      <summary>
+        <span class="summary-title">Server &amp; approvals</span>
+        <span class="summary-value" id="serverSummary">127.0.0.1:8787</span>
+      </summary>
+      <div class="section-body">
+        <div class="control-group">
+          <span class="label">Server URL</span>
+          <div class="input-row">
+            <input id="serverUrl" type="text" placeholder="http://127.0.0.1:8787" />
+          </div>
+        </div>
+        <div class="control-group">
+          <label class="checkbox">
+            <input id="autoApprove" type="checkbox" />
+            Auto-approve write &amp; run (unsafe)
+          </label>
+        </div>
       </div>
-    </div>
-    <div class="control-group">
-      <label class="checkbox">
-        <input id="autoApprove" type="checkbox" />
-        Auto-approve write & run (unsafe)
-      </label>
-    </div>
-    <div class="control-group">
-      <label class="checkbox">
-        <input id="includeTab" type="checkbox" checked />
-        Read active tab into context
-      </label>
-    </div>
-  </section>
-
-  <section class="section project-bar">
-    <div class="control-group row">
-      <span class="label">Project</span>
-      <div class="input-row">
-        <input id="projectRoot" type="text" placeholder="C:\path\to\your\project" />
-        <button id="setProject" class="btn secondary">Set</button>
-      </div>
-    </div>
-  </section>
-
-  <section class="section auto-bar">
-    <div class="control-group">
-      <span class="label">Auto features</span>
-      <div class="auto-row">
-        <label class="checkbox">
-          <input id="autoSearch" type="checkbox" />
-          Auto-search Google with my prompt
-        </label>
-        <label class="checkbox">
-          <input id="findBestLink" type="checkbox" />
-          Find best link
-        </label>
-        <label class="checkbox">
-          <input id="autoPrompt" type="checkbox" checked />
-          Auto-fill prompt with page context
-        </label>
-      </div>
-    </div>
-    <div class="control-group row">
-      <span class="label">Research</span>
-      <select id="researchMode">
-        <option value="full">Full page research</option>
-        <option value="summary">Summary only</option>
-        <option value="links">Find and follow links</option>
-      </select>
-    </div>
-  </section>
-
-  <section class="section tab-profile" aria-live="polite">
-    <div class="tab-profile-header">
-      <img id="tabFavicon" class="tab-favicon hidden" alt="" />
-      <span class="tab-badge">Active tab</span>
-      <div class="tab-info">
-        <div id="tabTitle" class="tab-title">Loading…</div>
-        <div id="tabUrl" class="tab-url">Waiting for browser tab</div>
-      </div>
-    </div>
-  </section>
+    </details>
   </div>
 
   <main id="messages" class="messages"></main>
 
-  <div class="chat-controls">
-    <button id="newChatBtn" class="btn secondary" title="New chat">＋ New Chat</button>
-    <button id="clearHistoryBtn" class="btn secondary danger" title="Delete history">🗑 Clear History</button>
+  <div class="actionbar">
+    <button id="stopBtn" class="btn danger action" title="Stop generating" disabled>■ Stop</button>
+    <button id="regenBtn" class="btn secondary action" title="Regenerate the last answer" disabled>↻ Regenerate</button>
+    <button id="copyBtn" class="btn secondary action" title="Copy the last answer" disabled>⧉ Copy</button>
+    <button id="clearHistoryBtn" class="btn secondary danger action" title="Delete history">🗑 Clear</button>
   </div>
 
   <section id="approval" class="approval hidden">
@@ -129,11 +159,11 @@
   <footer class="composer">
     <textarea id="input" rows="1" placeholder="Ask anything…  ⏎ send"></textarea>
     <div class="composer-actions">
-      <button id="stopBtn" class="send-btn stop" title="Stop" hidden>■</button>
       <button id="send" class="send-btn">➤</button>
     </div>
   </footer>
 
+  <script src="markdown.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

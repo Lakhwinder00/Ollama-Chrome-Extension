@@ -176,6 +176,15 @@ async function handleChat(req, res) {
     return;
   }
 
+  // Regenerate: the client rewinds the transcript and sends the history it
+  // wants the retry conditioned on, so the old answer is not part of the
+  // context for the replacement.
+  if (Array.isArray(body.messages)) {
+    session.messages = body.messages.filter(
+      (m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string'
+    );
+  }
+
   session.messages.push({ role: 'user', content: userMessage });
 
   const caps = await getCapabilities();

@@ -13,6 +13,21 @@ const messagesEl = $('messages');
 const inputEl = $('input');
 const sendBtn = $('send');
 const stopBtn = $('stopBtn');
+const regenBtn = $('regenBtn');
+const copyBtn = $('copyBtn');
+const genStatusEl = $('genStatus');
+const responseTimeEl = $('responseTime');
+const statusModelEl = $('statusModel');
+
+const GEN_LABELS = {
+  idle: 'Ready',
+  working: 'Working…',
+  thinking: 'Thinking…',
+  tools: 'Running tools…',
+  generating: 'Generating…',
+  stopped: 'Stopped',
+  error: 'Error',
+};
 
 let settings = {
   serverUrl: DEFAULT_SERVER,
@@ -32,6 +47,8 @@ let lastBlock = null;
 let persistTimer = null;
 let streaming = false;
 let activeController = null;
+let runStartedAt = 0;
+let runTicker = null;
 
 // ---------------- storage ----------------
 async function loadSettings() {
@@ -50,7 +67,12 @@ async function loadSettings() {
   $('findBestLink').checked = settings.findBestLink || false;
   $('autoPrompt').checked = settings.autoPrompt !== false;
   $('researchMode').value = settings.researchMode || 'full';
+  if (settings.projectRoot) $('projectSummary').textContent = settings.projectRoot;
   if (transcript.length) renderTranscript();
+  updateStatusModel();
+  updateAutoSummary();
+  updateServerSummary();
+  updateActionButtons();
 }
 
 function saveSettings() {
@@ -65,6 +87,112 @@ function schedulePersist() {
   );
 }
 
+// ---------------- status strip ----------------
+function formatDuration(ms) {
+  if (!isFinite(ms) || ms <= 0) return '—';
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`;
+}
+
+function setGenState(state, label) {
+  if (!genStatusEl) return;
+  genStatusEl.dataset.state = state;
+  genStatusEl.textContent = label || GEN_LABELS[state] || GEN_LABELS.idle;
+}
+
+function setResponseTime(ms) {
+  if (!responseTimeEl) return;
+  responseTimeEl.textContent = formatDuration(ms);
+  responseTimeEl.title = ms ? `Last run: ${formatDuration(ms)}` : 'Response time for the last run';
+}
+
+function updateStatusModel() {
+  if (!statusModelEl) return;
+  const model = settings.model || '';
+  statusModelEl.textContent = model || 'no model';
+  statusModelEl.title = model ? `Model: ${model} — click to change` : 'Pick a model';
+  const summary = $('modelSummary');
+  if (summary) summary.textContent = model || 'none';
+  const sel = $('modelSelect');
+  if (sel) sel.title = model ? `Current model: ${model}` : 'Ollama model';
+}
+
+function updateAutoSummary() {
+  const el = $('autoSummary');
+  if (!el) return;
+  const on = [settings.autoSearchOnSend, settings.findBestLink, settings.autoPrompt !== false].filter(Boolean).length;
+  el.textContent = on ? `${on} feature${on > 1 ? 's' : ''} on` : 'off';
+}
+
+function updateServerSummary() {
+  const el = $('serverSummary');
+  if (!el) return;
+  el.textContent = (settings.serverUrl || DEFAULT_SERVER).replace(/^https?:\/\//, '');
+}
+
+/** Expand (or collapse) one settings section and scroll it into view. */
+function toggleSection(id, open) {
+  const section = $(id);
+  if (!section) return;
+  if (typeof open === 'boolean') section.open = open;
+  else section.open = !section.open;
+  const settingsBtn = $('settingsBtn');
+  if (settingsBtn) {
+    settingsBtn.classList.toggle('active', !!$('settingsPanel').open);
+    settingsBtn.setAttribute('aria-expanded', String(!!$('settingsPanel').open));
+  }
+  if (section.open) section.scrollIntoView({ block: 'nearest' });
+}
+
+function lastUserText() {
+  for (let i = transcript.length - 1; i >= 0; i -= 1) {
+    if (transcript[i].role === 'user') return transcript[i].text;
+  }
+  return '';
+}
+
+function lastAssistantText() {
+  for (let i = transcript.length - 1; i >= 0; i -= 1) {
+    const item = transcript[i];
+    if (item.role === 'assistant' && item.text) return item.text;
+  }
+  return '';
+}
+
+function updateActionButtons() {
+  if (stopBtn) stopBtn.disabled = !streaming;
+  if (regenBtn) regenBtn.disabled = streaming || !lastUserText();
+  if (copyBtn) copyBtn.disabled = !lastAssistantText();
+}
+
+function beginRun() {
+  streaming = true;
+  sendBtn.disabled = true;
+  runStartedAt = performance.now();
+  setGenState('working');
+  setResponseTime(0);
+  if (responseTimeEl) responseTimeEl.classList.add('live');
+  clearInterval(runTicker);
+  runTicker = setInterval(() => {
+    if (runStartedAt) setResponseTime(performance.now() - runStartedAt);
+  }, 100);
+  updateActionButtons();
+}
+
+function endRun(state) {
+  const ms = runStartedAt ? performance.now() - runStartedAt : 0;
+  runStartedAt = 0;
+  clearInterval(runTicker);
+  runTicker = null;
+  streaming = false;
+  sendBtn.disabled = false;
+  activeController = null;
+  if (responseTimeEl) responseTimeEl.classList.remove('live');
+  if (ms > 0) setResponseTime(ms);
+  setGenState(state || 'idle');
+  flushAssistantPaint();
+  updateActionButtons();
+}
+
 // ---------------- rendering ----------------
 function scrollToBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -77,11 +205,34 @@ function appendEl(className) {
   return el;
 }
 
+// Assistant text is Markdown. Streaming repaints are coalesced into one
+// animation frame so a token-by-token reply does not re-highlight the whole
+// bubble on every chunk.
+function paintMarkdown(bubble, item, immediate) {
+  if (bubble._paintRaf) {
+    cancelAnimationFrame(bubble._paintRaf);
+    bubble._paintRaf = null;
+  }
+  const paint = () => {
+    bubble._paintRaf = null;
+    bubble.innerHTML = renderMarkdown(item.text);
+  };
+  if (immediate) paint();
+  else bubble._paintRaf = requestAnimationFrame(paint);
+}
+
+function flushAssistantPaint() {
+  if (lastBlock && lastBlock.type === 'assistant' && lastBlock.bubble) {
+    paintMarkdown(lastBlock.bubble, lastBlock.item, true);
+  }
+}
+
 function renderTranscript() {
   messagesEl.innerHTML = '';
   lastBlock = null;
   transcript.forEach(renderItem);
   scrollToBottom();
+  updateActionButtons();
 }
 
 function renderItem(item) {
@@ -96,8 +247,8 @@ function renderItem(item) {
     const wrap = appendEl('msg assistant' + (item.interim ? ' interim' : ''));
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    bubble.textContent = item.text;
     wrap.appendChild(bubble);
+    paintMarkdown(bubble, item, true);
     lastBlock = { type: 'assistant', wrap, bubble, item };
   } else if (item.role === 'tool') {
     const block = buildToolEl(item.name, item.args);
@@ -164,7 +315,7 @@ function appendAssistant(text, interim) {
     lastBlock = { type: 'assistant', wrap, bubble, item };
   }
   lastBlock.item.text += text;
-  lastBlock.bubble.textContent = lastBlock.item.text;
+  paintMarkdown(lastBlock.bubble, lastBlock.item);
   schedulePersist();
   scrollToBottom();
 }
@@ -213,6 +364,12 @@ function appendScreenshot(dataUrl) {
 }
 
 function appendStatus(text) {
+  // The same line can arrive from both the SSE event and the local action
+  // (e.g. "Stopped.") — show it once.
+  if (lastBlock && lastBlock.type === 'status' && lastBlock.el.textContent === text) {
+    scrollToBottom();
+    return;
+  }
   const el = appendEl('msg status-line');
   el.textContent = text;
   lastBlock = { type: 'status', el };
@@ -1512,6 +1669,7 @@ function handleEvent(event, data) {
       break;
     case 'status': {
       const message = payload.message || '…';
+      if (streaming) setGenState('working');
       // Heartbeat lines repeat while the model is silent — update in place so
       // the transcript does not fill up with identical pills.
       if (/still working/i.test(message) && lastBlock && lastBlock.type === 'status') {
@@ -1520,6 +1678,7 @@ function handleEvent(event, data) {
         break;
       }
       if (isPlanningStatus(message)) {
+        setGenState('thinking');
         appendThinking(message);
         break;
       }
@@ -1527,12 +1686,15 @@ function handleEvent(event, data) {
       break;
     }
     case 'thinking':
+      setGenState('thinking');
       appendThinking(payload.content || '');
       break;
     case 'assistant':
+      setGenState('generating');
       appendAssistant(payload.content || '', payload.interim);
       break;
     case 'tool':
+      setGenState('tools');
       appendTool(payload.name, payload.arguments);
       break;
     case 'tool_result':
@@ -1549,14 +1711,10 @@ function handleEvent(event, data) {
       break;
     case 'stopped':
       appendStatus('⏹ Stopped.');
-      streaming = false;
-      sendBtn.disabled = false;
-      stopBtn.hidden = true;
+      endRun('stopped');
       break;
     case 'done':
-      streaming = false;
-      sendBtn.disabled = false;
-      stopBtn.hidden = true;
+      endRun('idle');
       break;
     case 'error': {
       const msg = payload.message || 'unknown error';
@@ -1566,9 +1724,7 @@ function handleEvent(event, data) {
           'ℹ That model is a paid Ollama cloud model. Open ⚙ settings and pick a local model (qwen2.5-coder:14b or gemma4:latest).'
         );
       }
-      streaming = false;
-      sendBtn.disabled = false;
-      stopBtn.hidden = true;
+      endRun('error');
       break;
     }
   }
@@ -1629,15 +1785,17 @@ function buildTabContext(snap) {
   ].join('\n');
 }
 
-async function sendMessage() {
-  const text = inputEl.value.trim();
+async function sendMessage(overrideText, options) {
+  const opts = options || {};
+  const isRegen = typeof overrideText === 'string';
+  const text = isRegen ? overrideText : inputEl.value.trim();
   if (!text || streaming) return;
-  inputEl.value = '';
-  autoGrow();
-  appendUser(text);
-  streaming = true;
-  sendBtn.disabled = true;
-  stopBtn.hidden = false;
+  if (!isRegen) {
+    inputEl.value = '';
+    autoGrow();
+    appendUser(text);
+  }
+  beginRun();
   const ac = new AbortController();
   activeController = ac;
 
@@ -1722,6 +1880,9 @@ async function sendMessage() {
     model: settings.model || undefined,
     autoApprove: settings.autoApprove,
   };
+  // Regenerating rewinds the server-side history so the old answer is not
+  // part of the context for the replacement answer.
+  if (Array.isArray(opts.seedMessages)) body.messages = opts.seedMessages;
 
   try {
     const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/chat`, {
@@ -1732,12 +1893,11 @@ async function sendMessage() {
     });
     if (!res.ok || !res.body) throw new Error(`Server responded ${res.status}`);
     await readStream(res.body);
+    if (streaming) endRun('idle'); // stream closed without a done event
   } catch (e) {
-    if (!ac.signal.aborted) appendStatus('✖ ' + (e.message || e));
-    streaming = false;
-    sendBtn.disabled = false;
-    stopBtn.hidden = true;
-    activeController = null;
+    if (ac.signal.aborted) return; // stopRun() already finalized this run
+    appendStatus('✖ ' + (e.message || e));
+    endRun('error');
   } finally {
     // Hide research cursor
     try { document.body.style.cursor = ''; } catch {}
@@ -1758,10 +1918,7 @@ async function stopRun() {
       });
     } catch {}
   }
-  streaming = false;
-  sendBtn.disabled = false;
-  stopBtn.hidden = true;
-  activeController = null;
+  endRun('stopped');
   appendStatus('⏹ Stopped.');
 }
 
@@ -1872,17 +2029,14 @@ async function loadModels() {
       models = data.models;
       const sel = $('modelSelect');
       fillModelSelect(sel, models, data.details);
-      const labelEl = document.querySelector('.model-bar .label');
-      if (labelEl) labelEl.textContent = `Model · ${models.length}`;
-      sel.title = `${models.length} Ollama models installed — pick one`;
       const local = models.filter((m) => !isCloudModel(m));
-      
+
       // Set model to default if it's not already set or is a cloud model
       const needsReset =
         !settings.model ||
         (isCloudModel(settings.model) && local.length) ||
         !models.includes(settings.model);
-        
+
       if (needsReset && models.length) {
         settings.model = defaultModelChoice(models);
         saveSettings();
@@ -1892,6 +2046,9 @@ async function loadModels() {
       } else {
         sel.value = settings.model || '';
       }
+      sel.title = `${models.length} Ollama models installed — current: ${settings.model || 'none'}`;
+      updateStatusModel();
+      updateActionButtons();
     } else {
       // If no models are found, show error message in UI
       const connEl = $('conn');
@@ -1927,31 +2084,10 @@ async function setProject() {
     }
     settings.projectRoot = data.root;
     saveSettings();
+    $('projectSummary').textContent = data.root;
     appendStatus('Project set: ' + data.root);
   } catch (e) {
     appendStatus('✖ Could not reach server to set project. Please ensure Ollama is running.');
-  }
-}
-
-async function setProject() {
-  const root = $('projectRoot').value.trim();
-  if (!root) return;
-  try {
-    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/project`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ root }),
-    });
-    const data = await res.json();
-    if (!data.ok) {
-      appendStatus('✖ ' + data.error);
-      return;
-    }
-    settings.projectRoot = data.root;
-    saveSettings();
-    appendStatus('Project set: ' + data.root);
-  } catch (e) {
-    appendStatus('✖ Could not reach server to set project');
   }
 }
 
@@ -1969,6 +2105,7 @@ async function applyProject(root) {
 
 async function refreshActiveTabProfile() {
   const favEl = $('tabFavicon');
+  const summary = $('tabSummary');
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const titleEl = $('tabTitle');
@@ -1976,6 +2113,7 @@ async function refreshActiveTabProfile() {
     if (!tab) {
       titleEl.textContent = 'No active tab';
       urlEl.textContent = 'Open a page to enable context';
+      if (summary) summary.textContent = 'No active tab';
       favEl.classList.add('hidden');
       return;
     }
@@ -1983,10 +2121,15 @@ async function refreshActiveTabProfile() {
     const url = (tab.url || 'chrome://newtab').trim() || 'chrome://newtab';
     titleEl.textContent = title;
     urlEl.textContent = url;
+    if (summary) {
+      const include = $('includeTab');
+      summary.textContent = include && include.checked ? title : 'Context off';
+    }
     updateTabFavicon(tab, url);
   } catch (e) {
     $('tabTitle').textContent = 'Active tab unavailable';
     $('tabUrl').textContent = 'Tab metadata could not be loaded';
+    if (summary) summary.textContent = 'Tab unavailable';
     $('tabFavicon').classList.add('hidden');
   }
 }
@@ -2021,6 +2164,9 @@ function clearHistory() {
   lastBlock = null;
   saveSettings();
   chrome.storage.local.set({ transcript: [] });
+  setResponseTime(0);
+  setGenState('idle');
+  updateActionButtons();
 }
 
 function deleteHistory() {
@@ -2029,7 +2175,66 @@ function deleteHistory() {
 }
 
 function newChat() {
+  if (streaming) stopRun();
   clearHistory();
+}
+
+// ---------------- regenerate / copy ----------------
+/** Rewind to the last user prompt and run it again with fresh context. */
+function regenerate() {
+  if (streaming) return;
+  let idx = -1;
+  for (let i = transcript.length - 1; i >= 0; i -= 1) {
+    if (transcript[i].role === 'user') { idx = i; break; }
+  }
+  if (idx === -1) return;
+
+  const text = transcript[idx].text;
+  // Everything after the prompt (answer, tools, status lines) is discarded
+  // both locally and on the server, so the retry is not conditioned on the
+  // answer it replaces.
+  const seedMessages = transcript
+    .slice(0, idx)
+    .filter((item) => (item.role === 'user' || item.role === 'assistant') && item.text)
+    .map((item) => ({ role: item.role, content: item.text }));
+  transcript = transcript.slice(0, idx + 1);
+  schedulePersist();
+  renderTranscript();
+  sendMessage(text, { seedMessages });
+}
+
+async function writeClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    // Fallback for contexts where the async clipboard API is unavailable.
+    try {
+      const scratch = document.createElement('textarea');
+      scratch.value = text;
+      scratch.setAttribute('readonly', '');
+      scratch.style.position = 'fixed';
+      scratch.style.opacity = '0';
+      document.body.appendChild(scratch);
+      scratch.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(scratch);
+      return ok;
+    } catch (e2) {
+      return false;
+    }
+  }
+}
+
+async function copyLastResponse() {
+  const text = lastAssistantText();
+  if (!text) return;
+  const ok = await writeClipboard(text);
+  if (copyBtn) {
+    const original = copyBtn.textContent;
+    copyBtn.textContent = ok ? '✓ Copied' : '✕ Failed';
+    setTimeout(() => { copyBtn.textContent = original; }, 1400);
+  }
 }
 
 function autoGrow() {
@@ -2058,15 +2263,28 @@ function init() {
   $('newChatBtn').addEventListener('click', newChat);
   $('clearHistoryBtn').addEventListener('click', deleteHistory);
   $('stopBtn').addEventListener('click', stopRun);
-  $('settingsBtn').addEventListener('click', () => {
-    const open = !$('settingsPanel').classList.toggle('hidden');
-    $('settingsBtn').classList.toggle('active', open);
+  $('regenBtn').addEventListener('click', regenerate);
+  $('copyBtn').addEventListener('click', copyLastResponse);
+
+  // Collapsible sections: the gear jumps to Server & approvals, the model chip
+  // jumps to Model — both expand their <details> instead of hiding controls.
+  $('settingsBtn').addEventListener('click', () => toggleSection('settingsPanel'));
+  statusModelEl.addEventListener('click', () => {
+    toggleSection('modelSection', true);
+    const sel = $('modelSelect');
+    if (sel) sel.focus();
   });
-  $('setupBtn').addEventListener('click', () => {
-    const collapsed = $('setupBlock').classList.toggle('collapsed');
-    $('setupBtn').textContent = collapsed ? '▸' : '⌄';
-    $('setupBtn').setAttribute('aria-expanded', String(!collapsed));
-    $('setupBtn').classList.toggle('active', collapsed);
+
+  // Copy buttons live inside rendered Markdown, so they are delegated.
+  messagesEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('.code-copy');
+    if (!btn) return;
+    const code = btn.closest('.code-block') && btn.closest('.code-block').querySelector('code');
+    if (!code) return;
+    writeClipboard(code.textContent).then((ok) => {
+      btn.textContent = ok ? 'Copied' : 'Failed';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 1400);
+    });
   });
   $('setProject').addEventListener('click', setProject);
   $('projectRoot').addEventListener('keydown', (e) => {
@@ -2081,6 +2299,7 @@ function init() {
   $('modelSelect').addEventListener('change', (e) => {
     settings.model = e.target.value;
     saveSettings();
+    updateStatusModel();
   });
   $('autoApprove').addEventListener('change', (e) => {
     settings.autoApprove = e.target.checked;
@@ -2089,6 +2308,8 @@ function init() {
   $('includeTab').addEventListener('change', (e) => {
     settings.includeTab = e.target.checked;
     saveSettings();
+    const summary = $('tabSummary');
+    if (summary) summary.textContent = e.target.checked ? $('tabTitle').textContent : 'Context off';
   });
   $('autoSearch').addEventListener('change', (e) => {
     settings.autoSearchOnSend = e.target.checked;
