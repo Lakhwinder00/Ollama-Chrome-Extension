@@ -11,7 +11,7 @@ const { promisify } = require('util');
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-const { fetchPageText, webSearch } = require('./web');
+const { fetchPageText, webSearch, normalizeSearchProvider } = require('./web');
 
 const MAX_READ_LINES = 2000;
 const MAX_SEARCH_FILES = 1500;
@@ -249,7 +249,20 @@ function htmlDecode(s) {
 
 async function web_search(args) {
   const query = String((args && args.query) || '').trim();
-  return webSearch(query);
+  return webSearch(query, searchProvider);
+}
+
+// The user picks a search engine in the extension (Settings → Automation);
+// the server applies it to every web_search call for this process.
+let searchProvider = 'duckduckgo';
+
+function setSearchProvider(provider) {
+  searchProvider = normalizeSearchProvider(provider);
+  return searchProvider;
+}
+
+function getSearchProvider() {
+  return searchProvider;
 }
 
 async function fetch_url(args) {
