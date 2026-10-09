@@ -275,9 +275,15 @@ async function route(req, res, pathname) {
 
   if (req.method === 'GET' && pathname === '/models') {
     try {
-      const models = await provider.listModels();
+      let details = [];
+      try {
+        details = await provider.listModelDetails();
+      } catch {
+        details = []; // older providers may not expose details
+      }
+      const models = details.length ? details.map((d) => d.name) : await provider.listModels();
       capabilitiesCache = null; // re-read capabilities on next chat
-      sendJson(res, 200, { ok: true, models });
+      sendJson(res, 200, { ok: true, models, details });
     } catch (e) {
       sendJson(res, 502, { ok: false, error: e.message });
     }

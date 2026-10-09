@@ -430,6 +430,7 @@ const BROWSER_TOOLS = new Set([
   'get_dom',
   'click',
   'type',
+  'key',
   'scroll',
   'screenshot',
   'navigate',
@@ -689,13 +690,18 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'click',
       description:
-        'Click anywhere on the active browser tab (requires approval; approve Session/Always once and the agent keeps acting automatically). Prefer `index` from the latest get_dom snapshot (most reliable); selector and visible-text matching are fallbacks. Works on links, buttons, tabs, menus, or any other element.',
+        'Click on the active browser tab (allowed without approval). Prefer `index` from the latest get_dom snapshot (most reliable); selector and visible-text matching are fallbacks. Works on links, buttons, tabs, menus, or any other element. Use button: "double" for double-click and "right" for right-click/context menu.',
       parameters: {
         type: 'object',
         properties: {
           index: { type: 'integer', description: 'Element number from the latest get_dom snapshot (preferred).' },
           selector: { type: 'string', description: 'CSS selector of the element, e.g. "#submit" or "button.login".' },
           text: { type: 'string', description: 'Visible text of the element to click (case-insensitive substring match).' },
+          button: {
+            type: 'string',
+            enum: ['left', 'double', 'right'],
+            description: 'Which mouse button / click type (default left).',
+          },
         },
       },
     },
@@ -705,7 +711,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'type',
       description:
-        'Type text into an input, textarea, select, or content-editable field on the active tab, exactly like a user: characters are entered one by one with key events (requires approval; approve Session/Always once to keep going automatically). Prefer `index` from the latest get_dom snapshot.',
+        'Type text into an input, textarea, select, or content-editable field on the active tab, exactly like a user: characters are entered one by one with key events (allowed without approval). Prefer `index` from the latest get_dom snapshot. Set press_enter: true to press Enter afterwards (submit a form or search box).',
       parameters: {
         type: 'object',
         properties: {
@@ -713,6 +719,7 @@ const TOOL_DEFINITIONS = [
           selector: { type: 'string', description: 'CSS selector of the field, e.g. "#email".' },
           text: { type: 'string', description: 'Placeholder, name, or aria-label of the field to find.' },
           value: { type: 'string', description: 'The text to type into the field.' },
+          press_enter: { type: 'boolean', description: 'Press Enter after typing (default false).' },
         },
         required: ['value'],
       },
@@ -721,9 +728,27 @@ const TOOL_DEFINITIONS = [
   {
     type: 'function',
     function: {
+      name: 'key',
+      description:
+        'Press keyboard keys or shortcuts on the active tab (allowed without approval) — full keyboard control. Targets the given element (or the focused element / page when omitted). Examples: keys: "Enter", "Escape", "Tab", "ArrowDown", "Ctrl+A", "Ctrl+Shift+P", "Ctrl+S". Separate multiple keys with spaces to press them in sequence ("Enter Enter").',
+      parameters: {
+        type: 'object',
+        properties: {
+          keys: { type: 'string', description: 'Key or combo to press, e.g. "Enter", "Ctrl+A", "Ctrl+Shift+P".' },
+          index: { type: 'integer', description: 'Element number from the latest get_dom snapshot to focus first (preferred).' },
+          selector: { type: 'string', description: 'CSS selector of the element to focus first, e.g. "#search".' },
+          text: { type: 'string', description: 'Visible text of the element to focus first.' },
+        },
+        required: ['keys'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'edit_element',
       description:
-        'Update an existing element on the active page: change its text, inner HTML, form value, or an attribute. The change is applied immediately and the user sees it live in their tab, highlighted so they can watch it happen (a refresh restores the original). Requires approval: the first change asks the user, and Session/Always lets the agent update and save content automatically. Prefer `index` from the latest get_dom snapshot.',
+        'Update an existing element on the active page: change its text, inner HTML, form value, or an attribute. The change is applied immediately and the user sees it live in their tab, highlighted so they can watch it happen (a refresh restores the original). Allowed without approval — use it whenever the task needs the page updated. Prefer `index` from the latest get_dom snapshot.',
       parameters: {
         type: 'object',
         properties: {
@@ -744,7 +769,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'add_element',
       description:
-        'Add new content to the active page (insert HTML or plain text into/next to an element). The user sees it appear live in their tab, highlighted so they can watch it happen; a refresh removes it. Requires approval: the first insert asks the user, and Session/Always lets the agent add content automatically. Use it to add missing content, notes, banners, or results to the page.',
+        'Add new content to the active page (insert HTML or plain text into/next to an element). The user sees it appear live in their tab, highlighted so they can watch it happen; a refresh removes it. Allowed without approval. Use it to add missing content, notes, banners, or results to the page.',
       parameters: {
         type: 'object',
         properties: {
@@ -762,7 +787,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'delete_element',
       description:
-        'Remove an element from the active page. The user sees it disappear live, with the removed spot boxed in red so they can watch it happen; a refresh restores it. Requires approval: the first removal asks the user, and Session/Always lets the agent delete automatically. Prefer `index` from the latest get_dom snapshot. Use it when something on the page should go (noise, popups, banners).',
+        'Remove an element from the active page. The user sees it disappear live, with the removed spot boxed in red so they can watch it happen; a refresh restores it. Allowed without approval. Prefer `index` from the latest get_dom snapshot. Use it when something on the page should go (noise, popups, banners).',
       parameters: {
         type: 'object',
         properties: {

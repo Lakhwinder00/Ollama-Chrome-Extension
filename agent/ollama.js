@@ -5,6 +5,31 @@
 
 const DEFAULT_OLLAMA_URL = process.env.OLLAMA_URL || 'http://127.0.0.1:11434';
 
+/**
+ * Context window sent with each request. Ollama's default (4096) is too small
+ * for an agent: when the prompt overflows, the server silently drops the
+ * oldest messages — often the user's question — and the qwen renderers then
+ * reject the request with 500 "no user query found in messages". A larger
+ * num_ctx keeps the whole transcript (system prompt + tools + history).
+ */
+const NUM_CTX = Number(process.env.OLLAMA_NUM_CTX) || 8192;
+
+/**
+ * Shape the message list the way Ollama's renderers require: exactly one
+ * leading system message and at least one user turn anywhere in the history
+ * (tool-loop continuations alone are rejected with 500).
+ */
+function prepareMessages(messages) {
+  const list = (Array.isArray(messages) ? messages : []).filter((m) => m && typeof m === 'object');
+  const systems = list.filter((m) => m.role === 'system');
+  const rest = list.filter((m) => m.role !== 'system');
+  const out = [...systems.slice(0, 1), ...rest];
+  if (!out.some((m) => m.role === 'user')) {
+    out.push({ role: 'user', content: 'Continue from the results above and answer the original request.' });
+  }
+  return out;
+}
+
 async function ollamaFetch(pathname, options = {}) {
   const res = await fetch(DEFAULT_OLLAMA_URL + pathname, options);
   if (!res.ok) {
@@ -23,6 +48,29 @@ async function listModels() {
   return (data.models || []).map((m) => m.name);
 }
 
+/**
+ * Normalize Ollama /api/tags model entries into picker-friendly details:
+ * name, disk size, parameter count, family, quantization, and capabilities.
+ */
+function mapModelDetails(models) {
+  return (Array.isArray(models) ? models : []).map((m) => ({
+    name: m.name,
+    size: typeof m.size === 'number' ? m.size : null,
+    parameterSize: (m.details && m.details.parameter_size) || null,
+    family: (m.details && m.details.family) || null,
+    quantization: (m.details && m.details.quantization_level) || null,
+    capabilities: Array.isArray(m.capabilities) ? m.capabilities : [],
+    modifiedAt: m.modified_at || null,
+  }));
+}
+
+/** Details for every installed model (what the extension's picker shows). */
+async function listModelDetails() {
+  const res = await ollamaFetch('/api/tags');
+  const data = await res.json();
+  return mapModelDetails(data.models || []);
+}
+
 /** Check whether Ollama is reachable and which models are installed. */
 async function health() {
   try {
@@ -39,7 +87,7 @@ async function health() {
  * `tools` is the Ollama tools array (OpenAI-style function definitions).
  */
 async function chat({ model, messages, tools, think = false, signal }) {
-  const payload = { model, messages, stream: false };
+  const payload = { model, messages: prepareMessages(messages), stream: false, options: { num_ctx: NUM_CTX } };
   if (tools && tools.length) payload.tools = tools;
   if (think) payload.think = true;
   const res = await ollamaFetch('/api/chat', {
@@ -62,7 +110,18 @@ async function modelCapabilities() {
   return map;
 }
 
-module.exports = { DEFAULT_OLLAMA_URL, listModels, health, chat, chatStream, modelCapabilities };
+module.exports = {
+  DEFAULT_OLLAMA_URL,
+  NUM_CTX,
+  prepareMessages,
+  listModels,
+  listModelDetails,
+  mapModelDetails,
+  health,
+  chat,
+  chatStream,
+  modelCapabilities,
+};
 
 /** Strip special tokens some models leak into their visible output. */
 function sanitizeText(text) {
@@ -96,7 +155,7 @@ function mergeToolCalls(acc, chunkCalls) {
  * Returns the assembled message plus whether content was streamed.
  */
 async function chatStream({ model, messages, tools, think = false, onDelta = () => {}, signal }) {
-  const payload = { model, messages, stream: true };
+  const payload = { model, messages: prepareMessages(messages), stream: true, options: { num_ctx: NUM_CTX } };
   if (tools && tools.length) payload.tools = tools;
   if (think) payload.think = true;
 

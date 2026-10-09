@@ -366,7 +366,13 @@ function pageGetDom(args) {
 function ensureAgentRuntime() {
   // Rebuild when an older injected runtime (without the newer helpers) is
   // still cached on the page — the runtime is stateless, so this is safe.
-  if (window.__agentRuntime && typeof window.__agentRuntime.toast === 'function') return true;
+  if (
+    window.__agentRuntime &&
+    typeof window.__agentRuntime.toast === 'function' &&
+    typeof window.__agentRuntime.key === 'function'
+  ) {
+    return true;
+  }
   try {
     delete window.__agentRuntime;
   } catch (e) {
@@ -450,28 +456,48 @@ function ensureAgentRuntime() {
         }, ms || 2400);
       } catch (e) { /* toast is best-effort */ }
     },
-    mouse(el) {
+    mouse(el, opts) {
+      const o = opts || {};
       try {
         if (el.focus) el.focus();
       } catch (e) { /* focus is best-effort */ }
       try {
         const r = rectOf(el);
+        const isRight = o.button === 'right';
         const base = {
           bubbles: true,
           cancelable: true,
           view: window,
           clientX: r.left + r.width / 2,
           clientY: r.top + r.height / 2,
-          button: 0,
+          button: isRight ? 2 : 0,
+          detail: o.double ? 2 : 1,
         };
-        el.dispatchEvent(
-          new PointerEvent('pointerdown', Object.assign({}, base, { buttons: 1, pointerId: 1, isPrimary: true, pointerType: 'mouse' }))
-        );
-        el.dispatchEvent(new MouseEvent('mousedown', Object.assign({}, base, { buttons: 1 })));
-        el.dispatchEvent(
-          new PointerEvent('pointerup', Object.assign({}, base, { buttons: 0, pointerId: 1, isPrimary: true, pointerType: 'mouse' }))
-        );
-        el.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, base, { buttons: 0 })));
+        const buttons = isRight ? 2 : 1;
+        const downUp = () => {
+          el.dispatchEvent(
+            new PointerEvent('pointerdown', Object.assign({}, base, { buttons: buttons, pointerId: 1, isPrimary: true, pointerType: 'mouse' }))
+          );
+          el.dispatchEvent(new MouseEvent('mousedown', Object.assign({}, base, { buttons: buttons })));
+          el.dispatchEvent(
+            new PointerEvent('pointerup', Object.assign({}, base, { buttons: 0, pointerId: 1, isPrimary: true, pointerType: 'mouse' }))
+          );
+          el.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, base, { buttons: 0 })));
+        };
+        if (o.double) {
+          downUp();
+          el.dispatchEvent(new MouseEvent('click', Object.assign({}, base, { detail: 1 })));
+          downUp();
+          el.dispatchEvent(new MouseEvent('click', Object.assign({}, base, { detail: 2 })));
+          el.dispatchEvent(new MouseEvent('dblclick', base));
+          return { clicked: true, double: true, clientX: Math.round(base.clientX), clientY: Math.round(base.clientY) };
+        }
+        if (isRight) {
+          downUp();
+          el.dispatchEvent(new MouseEvent('contextmenu', base));
+          return { clicked: true, button: 'right', clientX: Math.round(base.clientX), clientY: Math.round(base.clientY) };
+        }
+        downUp();
         el.dispatchEvent(new MouseEvent('click', Object.assign({}, base, { buttons: 0 })));
         return { clicked: true, clientX: Math.round(base.clientX), clientY: Math.round(base.clientY) };
       } catch (e) {
@@ -480,6 +506,74 @@ function ensureAgentRuntime() {
         } catch (e2) { /* ignore */ }
         return { clicked: true };
       }
+    },
+    /** Press keyboard keys/shortcuts ("Enter", "Ctrl+A", "Ctrl+Shift+P"). */
+    key(el, keys) {
+      const CODES = {
+        backspace: 8, tab: 9, enter: 13, shift: 16, control: 17, alt: 18, escape: 27,
+        esc: 27, space: 32, ' ': 32, pageup: 33, pagedown: 34, end: 35, home: 36,
+        arrowleft: 37, arrowup: 38, arrowright: 39, arrowdown: 40, insert: 45, delete: 46,
+        meta: 91, cmd: 91, command: 91, f1: 112, f2: 113, f3: 114, f4: 115, f5: 116,
+        f6: 117, f7: 118, f8: 119, f9: 120, f10: 121, f11: 122, f12: 123,
+        '+': 187, '-': 189, '=': 187, ',': 188, '.': 190, '/': 191, ';': 186, "'": 222,
+      };
+      try {
+        if (el && el.focus) el.focus();
+      } catch (e) { /* focus is best-effort */ }
+      const tokens = String(keys || '').trim().split(/[\s,]+/).filter(Boolean);
+      const pressed = [];
+      let submitted = false;
+      for (const token of tokens) {
+        const parts = token.split('+');
+        let key = parts[parts.length - 1];
+        const mods = { ctrlKey: false, altKey: false, shiftKey: false, metaKey: false };
+        for (let i = 0; i < parts.length - 1; i++) {
+          const m = parts[i].toLowerCase();
+          if (m === 'ctrl' || m === 'control') mods.ctrlKey = true;
+          else if (m === 'alt' || m === 'option') mods.altKey = true;
+          else if (m === 'shift') mods.shiftKey = true;
+          else if (m === 'meta' || m === 'cmd' || m === 'command') mods.metaKey = true;
+        }
+        const lower = key.toLowerCase();
+        if (lower === 'space') key = ' ';
+        const keyCode =
+          CODES[lower] != null
+            ? CODES[lower]
+            : key.length === 1
+              ? key.toUpperCase().charCodeAt(0)
+              : 0;
+        const init = Object.assign(
+          {
+            key: key,
+            code: key === ' ' ? 'Space' : key.length === 1 ? 'Key' + key.toUpperCase() : key,
+            keyCode: keyCode,
+            which: keyCode,
+            bubbles: true,
+            cancelable: true,
+          },
+          mods
+        );
+        const downOk = el.dispatchEvent(new KeyboardEvent('keydown', init));
+        let pressOk = true;
+        if (lower === 'enter' || lower === 'space' || (key.length === 1 && !mods.ctrlKey && !mods.metaKey)) {
+          pressOk = el.dispatchEvent(new KeyboardEvent('keypress', init));
+        }
+        el.dispatchEvent(new KeyboardEvent('keyup', init));
+        pressed.push(token);
+        // Enter in a real form field: submit when the page did not handle it.
+        if (lower === 'enter' && downOk && pressOk && !submitted) {
+          const target = el;
+          submitted = true;
+          setTimeout(function () {
+            try {
+              if (target.isConnected && target.form && typeof target.form.requestSubmit === 'function') {
+                target.form.requestSubmit();
+              }
+            } catch (e) { /* page already handled it */ }
+          }, 150);
+        }
+      }
+      return { pressed: pressed, submitted: submitted || undefined };
     },
     type(el, value) {
       const text = String(value);
@@ -619,17 +713,20 @@ function pageClick(args) {
   if (!el && a.selector) el = document.querySelector(a.selector);
   if (!el && a.text) el = rt.byMatch(a.text);
   if (!el) throw new Error('No element matched: ' + JSON.stringify(a));
+  const button = a.button === 'double' || a.button === 'right' ? a.button : 'left';
   el.scrollIntoView({ block: 'center', behavior: 'auto' });
   rt.aim(el);
   return rt.wait(550).then(() => {
     rt.highlight(el, '#d97757', 1800);
-    const res = rt.mouse(el);
+    const res = rt.mouse(el, { button: button === 'double' ? 'left' : button, double: button === 'double' });
     const out = {
       clicked: true,
+      button: button,
       tag: el.tagName.toLowerCase(),
       text: ((el.innerText || el.textContent) || '').trim().slice(0, 120),
     };
-    rt.toast('Agent clicked ' + (out.text ? '“' + out.text.slice(0, 40) + '”' : '<' + out.tag + '>'));
+    const verb = button === 'double' ? 'double-clicked' : button === 'right' ? 'right-clicked' : 'clicked';
+    rt.toast('Agent ' + verb + ' ' + (out.text ? '“' + out.text.slice(0, 40) + '”' : '<' + out.tag + '>'));
     if (res && res.clientX != null) out.at = { x: res.clientX, y: res.clientY };
     if (a.index != null && a.index !== '') out.index = Number(a.index);
     return out;
@@ -661,12 +758,46 @@ function pageType(args) {
   return rt.wait(550).then(() => {
     rt.highlight(el, '#d97757', 2400);
     const r = rt.type(el, a.value);
-    rt.toast('Agent typed into ' + (a.selector || a.text || el.name || el.id || 'the field'));
-    return {
+    const out = {
       typed: true,
       into: a.selector || a.text || (a.index != null && a.index !== '' ? '#' + a.index : ''),
       value: String(a.value),
       chars: r && r.typed,
+    };
+    if (a.press_enter === true || a.press_enter === 'true') {
+      const k = rt.key(el, 'Enter');
+      out.enter = k && k.pressed;
+    }
+    rt.toast('Agent typed into ' + (a.selector || a.text || el.name || el.id || 'the field'));
+    return out;
+  });
+}
+
+/** Press keyboard keys/shortcuts on an element (or the focused element). */
+function pageKey(args) {
+  const a = args || {};
+  const rt = window.__agentRuntime;
+  if (!rt) throw new Error('Agent runtime not loaded — reload the extension at chrome://extensions.');
+  let el = rt.byIndex(a.index);
+  if (a.index != null && a.index !== '' && !el) {
+    throw new Error('Element #' + a.index + ' is stale — call get_dom again to refresh element numbers.');
+  }
+  if (!el && a.selector) el = document.querySelector(a.selector);
+  if (!el && a.text) el = rt.byMatch(a.text);
+  if (!el) el = document.activeElement || document.body;
+  const keys = String(a.keys != null ? a.keys : a.key != null ? a.key : '').trim();
+  if (!keys) throw new Error('key requires keys, e.g. keys: "Enter", "Ctrl+A", or "Escape".');
+  el.scrollIntoView ? el.scrollIntoView({ block: 'center', behavior: 'auto' }) : null;
+  rt.aim(el);
+  return rt.wait(350).then(() => {
+    const res = rt.key(el, keys);
+    rt.highlight(el, '#d97757', 1400);
+    rt.toast('Agent pressed ' + keys);
+    return {
+      pressed: res.pressed,
+      submitted: res.submitted,
+      target: el.tagName ? el.tagName.toLowerCase() : 'page',
+      selector: rt.path ? rt.path(el) : '',
     };
   });
 }
@@ -1079,6 +1210,7 @@ const BROWSER_EXECUTORS = {
   get_dom: pageGetDom,
   click: pageClick,
   type: pageType,
+  key: pageKey,
   scroll: pageScroll,
   get_links: pageGetLinksWithIds,
   find_best_link: pageFindBestLink,
@@ -1299,9 +1431,15 @@ function browserToolStatus(name, args) {
     case 'navigate':
       return '🌐 Opening ' + String(a.url || '');
     case 'click':
-      return '🌐 Clicking ' + (a.text || a.selector || 'the target');
+      return (
+        '🌐 ' +
+        (a.button === 'double' ? 'Double-clicking ' : a.button === 'right' ? 'Right-clicking ' : 'Clicking ') +
+        (a.text || a.selector || 'the target')
+      );
     case 'type':
       return '🌐 Typing into ' + (a.selector || a.text || 'the field');
+    case 'key':
+      return '🌐 Pressing ' + String(a.keys || a.key || '') + ' on the page';
     case 'get_page':
       return '🌐 Reading the active tab…';
     case 'get_dom':
@@ -1658,6 +1796,73 @@ function defaultModelChoice(list) {
   return pool.find((m) => /coder/i.test(m)) || pool[0];
 }
 
+// ---------------- grouped model picker ----------------
+const MODEL_GROUP_ORDER = ['Light (<4B)', 'Medium (4–8B)', 'Large (9–14B)', 'Heavy (15B+)', 'Vision', 'Cloud', 'Other'];
+
+function formatBytes(bytes) {
+  if (typeof bytes !== 'number' || !isFinite(bytes) || bytes <= 0) return '';
+  const gb = bytes / 1024 ** 3;
+  if (gb >= 1) return `${gb.toFixed(1).replace(/\.0$/, '')} GB`;
+  return `${Math.round(bytes / 1024 ** 2)} MB`;
+}
+
+function paramBillions(parameterSize) {
+  const m = /([\d.]+)\s*B\b/i.exec(String(parameterSize || ''));
+  return m ? parseFloat(m[1]) : null;
+}
+
+function modelGroup(d) {
+  if (isCloudModel(d.name)) return 'Cloud';
+  if (Array.isArray(d.capabilities) && d.capabilities.includes('vision')) return 'Vision';
+  const b = paramBillions(d.parameterSize);
+  if (b == null) return 'Other';
+  if (b < 4) return 'Light (<4B)';
+  if (b < 9) return 'Medium (4–8B)';
+  if (b < 15) return 'Large (9–14B)';
+  return 'Heavy (15B+)';
+}
+
+function modelOptionLabel(d) {
+  const size = formatBytes(d.size);
+  const meta = [size, d.quantization].filter(Boolean).join(' · ');
+  const caps = Array.isArray(d.capabilities) ? d.capabilities.filter((c) => c !== 'completion') : [];
+  const tail = [
+    meta,
+    caps.length ? `[${caps.join(', ')}]` : '',
+    isCloudModel(d.name) ? '(cloud)' : '',
+  ].filter(Boolean).join(' ');
+  return tail ? `${d.name} — ${tail}` : d.name;
+}
+
+/** Rebuild the model <select> with grouped options; keeps the current value. */
+function fillModelSelect(sel, list, details) {
+  const byName = new Map((Array.isArray(details) ? details : []).map((d) => [d.name, d]));
+  const groups = new Map();
+  for (const name of list) {
+    const d = byName.get(name) || { name };
+    const g = modelGroup(d);
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(d);
+  }
+  const ordered = [
+    ...MODEL_GROUP_ORDER.filter((g) => groups.has(g)),
+    ...[...groups.keys()].filter((g) => !MODEL_GROUP_ORDER.includes(g)),
+  ];
+  sel.innerHTML = '';
+  for (const label of ordered) {
+    const members = groups.get(label);
+    const og = document.createElement('optgroup');
+    og.label = `${label} (${members.length})`;
+    for (const d of members) {
+      const o = document.createElement('option');
+      o.value = d.name;
+      o.textContent = modelOptionLabel(d);
+      og.appendChild(o);
+    }
+    sel.appendChild(og);
+  }
+}
+
 async function loadModels() {
   try {
     // Try to fetch models from local Ollama server
@@ -1666,13 +1871,10 @@ async function loadModels() {
     if (data.ok && Array.isArray(data.models) && data.models.length > 0) {
       models = data.models;
       const sel = $('modelSelect');
-      sel.innerHTML = '';
-      models.forEach((m) => {
-        const o = document.createElement('option');
-        o.value = m;
-        o.textContent = m + (isCloudModel(m) ? ' (cloud)' : '');
-        sel.appendChild(o);
-      });
+      fillModelSelect(sel, models, data.details);
+      const labelEl = document.querySelector('.model-bar .label');
+      if (labelEl) labelEl.textContent = `Model · ${models.length}`;
+      sel.title = `${models.length} Ollama models installed — pick one`;
       const local = models.filter((m) => !isCloudModel(m));
       
       // Set model to default if it's not already set or is a cloud model

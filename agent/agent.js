@@ -17,18 +17,16 @@ const DANGEROUS_TOOLS = new Set([
   'run_command',
   'git_commit',
   'git_checkout',
-  // Browser tools that change the live page (update/save/remove content).
-  // They pause for approval the first time; Session/Always lets the agent
-  // keep acting automatically while the user watches it happen in the tab.
-  'click',
-  'type',
-  'edit_element',
-  'add_element',
-  'delete_element',
+  // Browser tools (click/type/edit_element/add_element/delete_element/navigate)
+  // need NO approval: the model may read the page, take screenshots, click any
+  // button, and update content freely — every change is highlighted live in the
+  // user's tab and disappears on refresh.
 ]);
-const MAX_ITERATIONS = 40;
 const MAX_HISTORY = 80;
-const MAX_RESEARCH_CALLS = 5;
+/** No step limit: a run only ends when the model answers or the user stops it.
+ *  This many straight steps with no new tool output (only blocked repeats)
+ *  means the model is stuck, so the run is wrapped up with a final answer. */
+const MAX_STAGNANT_STEPS = 5;
 
 const PLAN_PROMPT =
   "Before using any tools, think step by step about the user's request: what you need to inspect, what you plan to change, and why. Describe your plan briefly, then stop. Do not call any tools yet.";
@@ -63,14 +61,15 @@ function buildSystemPrompt() {
     '- web_search(query) — search the web and return the top related links. query must be a few short keywords, never the whole message or page text.',
     '- fetch_url(url) — fetch a web page and read its text (use after web_search to read a result).',
     '',
-    "Browser tools (operate on the user's active Chrome tab):",
+    "Browser tools (operate on the user's active Chrome tab — always allowed, no approval needed):",
     "- get_page(max_chars?, max_scrolls?) — read the tab's URL, title, and full page text (auto-scrolls).",
     '- get_dom(selector?, max_items?) — snapshot the page as a numbered element list (index, tag, text, selector). Re-run it whenever an index looks stale.',
-    '- click(index? or selector? or text?) — click any element on the page (requires approval). index (from get_dom) is the most reliable.',
-    '- type(index? or selector? or text?, value) — type into a field on the page, character by character as a user would (requires approval).',
-    '- edit_element(index? or selector? or match?, text?/html?/value?/attribute?, attribute_value?) — update an existing element on the page (requires approval).',
-    '- add_element(html? or text?, selector?, index?, position?) — add new content to the page (requires approval).',
-    '- delete_element(index? or selector? or match?) — remove an element from the page (requires approval).',
+    '- click(index? or selector? or text?, button?) — click any element on the page (links, buttons, tabs, menus). button: "left" (default), "double", or "right" (context menu). index (from get_dom) is the most reliable.',
+    '- type(index? or selector? or text?, value, press_enter?) — type into a field on the page, character by character as a user would. press_enter: true presses Enter afterwards (submit/search).',
+    '- key(keys, index?/selector?/text?) — press keyboard keys/shortcuts with full keyboard control: "Enter", "Escape", "Tab", "ArrowDown", "Ctrl+A", "Ctrl+Shift+P", "Ctrl+S". Without a target it presses on the focused element/page; space-separated keys run in sequence.',
+    '- edit_element(index? or selector? or match?, text?/html?/value?/attribute?, attribute_value?) — update an existing element on the page.',
+    '- add_element(html? or text?, selector?, index?, position?) — add new content to the page.',
+    '- delete_element(index? or selector? or match?) — remove an element from the page.',
     '- scroll(direction?, amount?, selector?) — scroll the page or an element into view.',
     '- screenshot — capture the active tab. With a vision-capable model the image is sent back to you so you can see the page like the user does.',
     '- navigate(url) — open a URL in the active tab.',
@@ -80,16 +79,17 @@ function buildSystemPrompt() {
     "When the user refers to a page, profile, or website, read the active tab with get_page first. If it is not the right page, use search to find it on Google.",
     'Decide yourself whether a search is needed: the extension never searches on its own. Call search only when the answer, page, or profile genuinely requires it (unknown or current information, or the right page is not open). If you can answer from the active tab or your knowledge, do not search.',
     'Every browser action runs live in the user-visible active tab, and the user watches it happen step by step. Prefer a short, precise search query over a long prompt, and never search speculatively.',
-    'You may change the page itself when you judge it needs changing (fix or update text, add missing content, remove noise or popups): call edit_element/add_element/delete_element (and click/type). The user is asked to approve the first change — approve it as Session or Always and the agent keeps acting automatically — while every change is highlighted live in their tab, so do not ask the user to approve each step in chat. Changes only affect the current tab and disappear on refresh, so be bold but purposeful — change what the task requires, then screenshot to verify.',
+    'You have full permission to operate the active tab — full mouse and keyboard control: take screenshots, read and understand the page, click (left, double, or right), type into any field, press any key or shortcut (Enter, Escape, Tab, Ctrl+A…), and update or remove any content — no approval is needed for browser actions. Changes are highlighted live in the user\'s tab as they happen.',
+    'You may change the page itself when you judge it needs changing (fix or update text, add missing content, remove noise or popups): call edit_element/add_element/delete_element (and click/type) directly. Do not ask the user to approve each step in chat — just do it. Changes only affect the current tab and disappear on refresh, so be bold but purposeful — change what the task requires, then screenshot to verify.',
     'EDIT REQUESTS ARE NOT RESEARCH: when the user asks to update, edit, fix, save, fill, add, or remove something ("update my profile", "correct my headline", "save the form"), you MUST act on the active tab (get_dom → click/type/edit_element → screenshot) and report what changed. Never answer an edit request with web_search, a link list, or a written analysis, and never hand the steps back to the user.',
     'You CAN edit live pages the user already has open — profiles, settings, forms, dashboards. For example, updating a profile means: click the Edit button, click each field, type the new text, click Save — all with your tools.',
     'NEVER hand manual instructions back to the user ("click Edit yourself", "you need to update...", numbered how-to steps) while the relevant page is (or can be) open in the active tab. Do the steps yourself instead. Only fall back to written instructions if a tool genuinely failed and you show the error.',
-    'After clicking, typing, scrolling, or editing, take a screenshot to verify what happened.',
+    'After clicking, typing, scrolling, or editing, take a screenshot to verify what happened — screenshot anytime you need to see the page.',
     '',
     'Browser task method (act on the active tab / a website, step by step like Claude):',
     '1. Understand the page first. If the message contains an "[Active browser tab ...]" block, use it; otherwise call get_page or get_dom.',
     '2. Before acting, write a short numbered plan: "Step 1: ...", "Step 2: ...", each naming the exact tool and target (index from get_dom, selector, text, or url).',
-    '3. Execute the plan one step at a time using the browser tools (click, type, navigate, scroll, search, edit_element, add_element, delete_element).',
+    '3. Execute the plan one step at a time using the browser tools (click, type, key, navigate, scroll, search, edit_element, add_element, delete_element).',
     '4. After each click/type/navigate/edit, take a screenshot to verify (you will see it if your model supports vision) or re-read with get_dom. If an element index went stale, re-run get_dom. Never repeat the same failing action.',
     '5. When the goal is done, stop and briefly summarize the steps performed and the result.',
     '',
@@ -113,7 +113,7 @@ function buildSystemPrompt() {
     '4. Cross-check facts across sources and note disagreements.',
     '5. Prefer the most recent primary source when they conflict.',
     '6. Answer with citations (title + URL) and a confidence note. Never claim 100% certainty.',
-    '7. Never search in a loop: after 4-5 searches stop and answer from the results you already have, noting anything missing.',
+    '7. Never search in a loop: keep researching as long as each new query adds new sources or facts; when results stop changing, stop and answer from what you gathered, noting anything missing.',
   ].join('\n') + loadProjectRules(root);
 }
 
@@ -142,6 +142,13 @@ function ensureSystemMessage(messages) {
   if (list.length > MAX_HISTORY) {
     const trimmed = list.filter((m) => m.role === 'system');
     trimmed.push(...list.slice(-(MAX_HISTORY - trimmed.length)));
+    // Ollama rejects histories with no user turn (500 "no user query found in
+    // messages") — trimming must never drop every user message.
+    if (!trimmed.some((m) => m.role === 'user')) {
+      const ask = lastUserText(list) || 'Please continue from the results above and answer the original request.';
+      const firstNonSystem = trimmed.findIndex((m) => m.role !== 'system');
+      trimmed.splice(firstNonSystem === -1 ? trimmed.length : firstNonSystem, 0, { role: 'user', content: ask });
+    }
     return trimmed;
   }
   return list;
@@ -306,13 +313,8 @@ function startHeartbeat(onEvent, label) {
 }
 
 /**
- * Last-resort answer: after the model has searched/read enough (or burned all
- * its steps), ask it once — without tools — to answer from what it gathered,
- * so the user never ends up with "maximum steps reached" and nothing else.
- */
-/**
- * Last-resort answer: after the model has searched/read enough (or burned all
- * its steps), ask it — without tools — to answer from what it gathered.
+ * Last-resort answer: after the model has stopped making progress (or needs a
+ * final answer), ask it — without tools — to answer from what it gathered.
  * Local models often answer with an empty string or a JSON blob, so the
  * prompt is retried with a stricter plain-text instruction before giving up.
  */
@@ -396,7 +398,7 @@ function briefToolResult(content) {
 /**
  * Deterministic wrap-up used when the model never produces a final answer:
  * lists every tool call of the run with its outcome, so the user always gets
- * a real result instead of "maximum steps reached".
+ * a real result instead of a dead end.
  */
 function progressSummary(history, lead) {
   const steps = [];
@@ -427,8 +429,8 @@ function progressSummary(history, lead) {
   const out = [
     lead ||
       (request
-        ? `I ran out of steps before finishing "${request}". Here is what I did:`
-        : 'I ran out of steps before finishing. Here is what I did:'),
+        ? `I stopped making new progress before finishing "${request}". Here is what I did:`
+        : 'I stopped making new progress before finishing. Here is what I did:'),
     '',
     ...(lines.length ? lines : ['- No tools were executed.']),
     '',
@@ -436,7 +438,7 @@ function progressSummary(history, lead) {
       ? `${changed.length} change(s) were applied — check the page/files above.`
       : 'No changes were saved yet.',
     '',
-    `Say "continue" to resume from these results (I will pick up where I stopped), or ask with a narrower request. Limit: ${MAX_ITERATIONS} steps per run.`,
+    `Say "continue" to resume from these results (I will pick up where I stopped), or ask with a narrower request.`,
   ];
   return out.join('\n');
 }
@@ -613,7 +615,7 @@ async function runAgent({
   const history = ensureSystemMessage(messages);
   const recentCalls = [];
   let browserNudges = 0;
-  let researchCalls = 0;
+  let stagnantSteps = 0;
   // Tool names already approved for this run (session scope or always-allow).
   const sessionAllowed = new Set(Array.isArray(preApproved) ? preApproved : []);
 
@@ -645,7 +647,9 @@ async function runAgent({
     }
   }
 
-  for (let step = 1; step <= MAX_ITERATIONS; step++) {
+  // No step limit — the run ends when the model answers, the user stops it,
+  // or MAX_STAGNANT_STEPS consecutive steps produce no new tool output.
+  for (let step = 1; ; step++) {
     if (signal && signal.aborted) {
       return { content: 'Stopped by the user.', history, stopped: true };
     }
@@ -734,12 +738,13 @@ async function runAgent({
       return { content, history };
     }
 
+    // A step is "progress" when at least one call got past the repeat guard.
+    let sawNewOutput = false;
     for (const tc of toolCalls) {
       const fn = tc.function || {};
       const name = fn.name;
       const args = fn.arguments || {};
       onEvent({ type: 'tool', name, arguments: args });
-      if (name === 'web_search' || name === 'search') researchCalls++;
 
       // Guard against the model looping on the same action.
       const callKey = name + ':' + JSON.stringify(args);
@@ -755,6 +760,7 @@ async function runAgent({
         });
         continue;
       }
+      sawNewOutput = true;
 
       if (DANGEROUS_TOOLS.has(name) && !autoApprove && !sessionAllowed.has(name) && typeof requestApproval === 'function') {
         const decision = await requestApproval(name, args);
@@ -804,22 +810,21 @@ async function runAgent({
       history.push(toolMessage);
     }
 
-    if (researchCalls >= MAX_RESEARCH_CALLS) {
-      const answer = await synthesizeFinalAnswer({ history, provider, model, signal, onEvent });
-      if (answer) {
-        history.push({ role: 'assistant', content: answer });
-        return { content: answer, history };
-      }
+    if (sawNewOutput) {
+      stagnantSteps = 0;
+    } else {
+      stagnantSteps++;
+      if (stagnantSteps >= MAX_STAGNANT_STEPS) break;
     }
   }
 
-  // The model never produced a usable final answer. ALWAYS turn the run into a
-  // real result: synthesize one (with a strict plain-text retry), and when that
-  // still fails, research the question from scratch — then attach a progress
-  // summary. There is no dead-end message anymore.
+  // The model stopped making progress without ever producing a final answer.
+  // ALWAYS turn the run into a real result: synthesize one (with a strict
+  // plain-text retry), and when that still fails, research the question from
+  // scratch — then attach a progress summary. There is no dead-end message.
   onEvent({
     type: 'status',
-    message: `Step limit reached (${MAX_ITERATIONS} steps) — finishing with a researched answer and a summary…`,
+    message: `No new progress after ${MAX_STAGNANT_STEPS} repeated steps — finishing with a researched answer and a summary…`,
   });
   const synthesized = await synthesizeFinalAnswer({ history, provider, model, signal, onEvent });
   if (synthesized) {
@@ -842,7 +847,7 @@ module.exports = {
   runAgent,
   buildSystemPrompt,
   DANGEROUS_TOOLS,
-  MAX_ITERATIONS,
+  MAX_STAGNANT_STEPS,
   convertToolCallObject,
   parseToolCallsFromContent,
   normalizeToolCalls,

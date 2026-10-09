@@ -31,16 +31,17 @@ User → Ollama ("I need to read login.js")
 **Tools:** `read_file`, `write_file`, `edit_file`, `delete_file`, `list_directory`, `search_files`,
 `run_command`, `git_status`, `git_diff`, `git_log`, `git_branch`, `git_checkout`, `git_commit`,
 `web_search`, `fetch_url` (project/web) +
-`get_page`, `get_dom`, `click`, `type`, `scroll`, `navigate`, `search`, `screenshot` (browser).
+`get_page`, `get_dom`, `click`, `type`, `key`, `scroll`, `navigate`, `search`, `screenshot` (browser).
 
 **Safety built in:**
 - The agent can only touch files **inside the project root you choose** — every path is
   resolved and checked before it touches disk.
-- Dangerous operations (`write_file`, `edit_file`, `delete_file`, `run_command`, `git_commit`,
-  `git_checkout`, plus browser `click`, `type`, `edit_element`, `add_element`, `delete_element`)
-  pause and ask for approval first.
-- Approvals have **scopes**: *Once*, *Session*, or *Always* (persisted in `~/.myagent/permissions.json`).
-  Approve once with *Session*/*Always* and the agent updates and saves page content automatically.
+- Dangerous **file/shell/git** operations (`write_file`, `edit_file`, `delete_file`, `run_command`,
+  `git_commit`, `git_checkout`) pause and ask for approval first.
+- **Browser actions need no approval**: the agent may read the page, take screenshots, click any
+  button, type, and update/insert/remove elements on the active tab freely.
+- Approvals (for file/shell/git) have **scopes**: *Once*, *Session*, or *Always* (persisted in
+  `~/.myagent/permissions.json`).
 - Every page change is shown live in the tab: a "Agent …" toast plus a colored highlight on the
   exact element, so you can watch each click, typing, edit, insert, and delete happen.
 - The server binds to `127.0.0.1` only.
@@ -90,15 +91,15 @@ Pick a model from the dropdown, then just ask it to fix a bug.
 > **Edit requests act, they don't research:** asking to "update / fix / save /
 > delete" something on the page makes the model review the active tab and change
 > it (`get_dom` → `click`/`type`/`edit_element` → screenshot) instead of running a
-> web search and writing an analysis. The first change asks for approval
-> (*Once*/*Session*/*Always*), and each change is highlighted live in your tab.
+> web search and writing an analysis. Browser actions run without approval — each
+> change is highlighted live in your tab so you can watch it happen.
 
 ## Server API
 
 | Endpoint      | Method | Body                                   | Returns                       |
 | ------------- | ------ | -------------------------------------- | ----------------------------- |
 | `/health`     | GET    | —                                      | Ollama + project status       |
-| `/models`     | GET    | —                                      | Installed Ollama models       |
+| `/models`     | GET    | —                                      | Installed models + details    |
 | `/project`    | GET    | —                                      | Current project root          |
 | `/project`    | POST   | `{ "root": "C:\\path" }`               | Set project root              |
 | `/chat`       | POST   | `{ sessionId?, message, model?, autoApprove? }` | Server-Sent Events stream |
@@ -237,8 +238,9 @@ extension/
   "… still working, waiting for the model (Ns)" line appears every ~12s while the model is
   silent. Web searches/fetches time out after 15–20s instead of hanging, and research reads
   announce "Reading source 1/3…" as it goes.
-- **"Step limit reached"** — a run stops after 20 steps, but it never ends in an error: the
-  model is first asked twice for a plain-text final answer (JSON-only replies are retried),
+- **"No new progress after 5 repeated steps"** — there is no step limit: a run only ends when
+  the model answers or you stop it. If the model gets stuck repeating the same blocked action,
+  it is first asked twice for a plain-text final answer (JSON-only replies are retried),
   and if that fails the question is **researched from scratch** (search + reads) and answered,
   with the list of tool calls, outcomes, and any page/file changes appended. Reply **continue**
   to resume from there. The old "Stopped: maximum steps reached." message no longer exists —

@@ -11,6 +11,7 @@
  *   endpoint          string    base URL of the provider
  *   defaultModel      string    default model name for this provider
  *   listModels()                Promise<string[]>
+ *   listModelDetails()          Promise<Array<{ name, size, parameterSize, family, quantization, capabilities }>>
  *   health()                    Promise<{ reachable: boolean, models?: string[], error?: string }>
  *   modelCapabilities()         Promise<{ [model: string]: Set<string> }>
  *   chat(opts)                  Promise<object>   (non-streaming completion)
@@ -30,6 +31,7 @@ class ModelProvider {
   }
 
   async listModels() { throw new Error('Not implemented.'); }
+  async listModelDetails() { throw new Error('Not implemented.'); }
   async health() { throw new Error('Not implemented.'); }
   async modelCapabilities() { throw new Error('Not implemented.'); }
   async chat() { throw new Error('Not implemented.'); }
@@ -50,6 +52,10 @@ class OllamaProvider extends ModelProvider {
 
   async listModels() {
     return ollama.listModels();
+  }
+
+  async listModelDetails() {
+    return ollama.listModelDetails();
   }
 
   async health() {
