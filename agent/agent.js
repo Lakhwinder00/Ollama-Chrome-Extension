@@ -59,6 +59,7 @@ function buildSystemPrompt() {
     '- git_checkout(branch) — switch to a branch (requires approval).',
     '- git_commit(message, files?, all?) — stage and commit changes (requires approval). Show git_diff first.',
     '- web_search(query) — search the web and return the top related links. query must be a few short keywords, never the whole message or page text.',
+    '- find_best_link(query, limit?, verify?) — search, then RANK the results with reasons and check they are reachable. Use this instead of web_search when you need the single best link to fetch or cite; it returns ranked candidates, not a flat list.',
     '- fetch_url(url) — fetch a web page and read its text (use after web_search to read a result).',
     '',
     "Browser tools (operate on the user's active Chrome tab — always allowed, no approval needed):",

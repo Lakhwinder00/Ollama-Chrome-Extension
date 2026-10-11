@@ -14,6 +14,7 @@
  *   listModelDetails()          Promise<Array<{ name, size, parameterSize, family, quantization, capabilities }>>
  *   health()                    Promise<{ reachable: boolean, models?: string[], error?: string }>
  *   modelCapabilities()         Promise<{ [model: string]: Set<string> }>
+ *   showModel(name)             Promise<{ name, contextLength, capabilities, tools, thinking, vision, … }>
  *   chat(opts)                  Promise<object>   (non-streaming completion)
  *   chatStream(opts)            Promise<{ streamedContent, message }>
  *
@@ -34,6 +35,7 @@ class ModelProvider {
   async listModelDetails() { throw new Error('Not implemented.'); }
   async health() { throw new Error('Not implemented.'); }
   async modelCapabilities() { throw new Error('Not implemented.'); }
+  async showModel() { throw new Error('Not implemented.'); }
   async chat() { throw new Error('Not implemented.'); }
   async chatStream() { throw new Error('Not implemented.'); }
 }
@@ -64,6 +66,10 @@ class OllamaProvider extends ModelProvider {
 
   async modelCapabilities() {
     return ollama.modelCapabilities();
+  }
+
+  async showModel(name) {
+    return ollama.showModel(name);
   }
 
   async chat(opts) {

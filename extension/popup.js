@@ -37,9 +37,11 @@ let settings = {
   projectRoot: '',
   sessionId: null,
   autoSearchOnSend: false,
-  findBestLink: false,
+  findBestLink: true,
   autoPrompt: true,
   researchMode: 'full',
+  searchProvider: 'google',
+  contextMode: 'full',
 };
 let models = [];
 let transcript = [];
@@ -64,15 +66,18 @@ async function loadSettings() {
   $('includeTab').checked = settings.includeTab !== false;
   $('projectRoot').value = settings.projectRoot || '';
   $('autoSearch').checked = !!settings.autoSearchOnSend;
-  $('findBestLink').checked = settings.findBestLink || false;
+  $('findBestLink').checked = settings.findBestLink !== false;
   $('autoPrompt').checked = settings.autoPrompt !== false;
   $('researchMode').value = settings.researchMode || 'full';
+  if ($('searchProvider')) $('searchProvider').value = settings.searchProvider || 'google';
+  if ($('contextMode')) $('contextMode').value = settings.contextMode || 'full';
   if (settings.projectRoot) $('projectSummary').textContent = settings.projectRoot;
   if (transcript.length) renderTranscript();
   updateStatusModel();
   updateAutoSummary();
   updateServerSummary();
   updateActionButtons();
+  updateContextIndicator();
 }
 
 function saveSettings() {
@@ -433,14 +438,41 @@ async function respondApproval(allowed, scope) {
 // These functions are serialized by chrome.scripting and run in the page
 // context, so they must be self-contained (no closure over popup state).
 async function pageGetPage(args) {
-  const maxChars = (args && args.max_chars) || 8000;
-  const maxScrolls = (args && args.max_scrolls) || 20;
-  const scrollStep = Math.round(window.innerHeight * 0.85);
-  const seen = new Set();
-  const parts = [];
-  let total = 0;
+  const a = args || {};
+  const mode = a.mode === 'selection' || a.mode === 'visible' ? a.mode : 'full';
+  const maxChars = a.max_chars || (mode === 'selection' ? 2000 : 8000);
+  const maxScrolls = mode === 'full' ? (a.max_scrolls || 20) : 0;
 
-  const collect = () => {
+  // Runs inside the page (chrome.scripting serializes this function alone), so
+  // the redaction helper must live here. Obvious secrets never leave the tab.
+  function redactSecrets(text) {
+    if (!text) return text;
+    return String(text)
+      .replace(/\b(?:sk|pk|rk|api)[-_][A-Za-z0-9_-]{16,}/g, '[redacted-key]')
+      .replace(/\bAIza[0-9A-Za-z_-]{20,}/g, '[redacted-key]')
+      .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '[redacted-key]')
+      .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, '[redacted-jwt]')
+      .replace(
+        /\b(password|passwd|pwd|secret|token|api[_ ]?key|auth(?:orization)?)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)/gi,
+        '$1: [redacted]'
+      );
+  }
+
+  if (mode === 'selection') {
+    const raw = String((window.getSelection && String(window.getSelection())) || '').trim();
+    const text = redactSecrets(raw).slice(0, maxChars);
+    return {
+      url: location.href,
+      title: document.title,
+      mode,
+      text,
+      empty: !raw,
+      truncated: raw.length > maxChars,
+      ...(raw ? {} : { hint: 'Nothing is selected on the page — ask the user to select the text first, or switch the context mode to Visible/Full page.' }),
+    };
+  }
+
+  const collect = (parts, seen, total) => {
     const text = (document.body && document.body.innerText) || '';
     for (const line of text.split('\n')) {
       const t = line.trim();
@@ -453,32 +485,55 @@ async function pageGetPage(args) {
     return true;
   };
 
-  let keepGoing = collect();
+  const seen = new Set();
+  const parts = [];
+  let total = 0;
   const startY = window.scrollY;
   let scrolls = 0;
-  while (keepGoing && scrolls < maxScrolls) {
-    const before = window.scrollY;
-    window.scrollBy({ top: scrollStep });
-    scrolls++;
-    await new Promise((r) => setTimeout(r, 120));
-    if (window.scrollY <= before) break;
-    keepGoing = collect();
+
+  if (mode === 'visible') {
+    // No scrolling: capture the page as currently rendered, then put the
+    // scroll position back exactly where the user left it.
+    collect(parts, seen, total);
+    window.scrollTo(0, startY);
+  } else {
+    let keepGoing = collect(parts, seen, total);
+    while (keepGoing && scrolls < maxScrolls) {
+      const before = window.scrollY;
+      window.scrollBy({ top: Math.round(window.innerHeight * 0.85) });
+      scrolls++;
+      await new Promise((r) => setTimeout(r, 120));
+      if (window.scrollY <= before) break;
+      keepGoing = collect(parts, seen, total);
+    }
+    window.scrollTo(0, startY);
   }
-  window.scrollTo(0, startY);
 
   const joined = parts.join('\n');
+  const redacted = redactSecrets(joined);
   return {
     url: location.href,
     title: document.title,
-    text: joined.slice(0, maxChars),
+    mode,
+    text: redacted.slice(0, maxChars),
     truncated: joined.length > maxChars,
     scrolled: scrolls,
+    redacted: redacted !== joined,
   };
 }
 
 function pageGetDom(args) {
   const selector = args && args.selector;
   const maxItems = (args && args.max_items) || 100;
+  // Field values are omitted by default (they can contain passwords, tokens,
+  // card numbers). The model opts in with include_values: true.
+  const includeValues = !!(args && args.include_values);
+  function redactValue(v) {
+    return String(v)
+      .replace(/\b(?:sk|pk|rk|api)[-_][A-Za-z0-9_-]{16,}/g, '[redacted-key]')
+      .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}/g, '[redacted-key]')
+      .slice(0, 60);
+  }
   const nodes = selector
     ? document.querySelectorAll(selector)
     : document.querySelectorAll(
@@ -494,6 +549,7 @@ function pageGetDom(args) {
     const index = elements.length + 1;
     el.setAttribute('data-agent-idx', String(index));
     const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+    const isPassword = (el.type || '').toLowerCase() === 'password';
     const entry = {
       index,
       tag: el.tagName.toLowerCase(),
@@ -504,7 +560,10 @@ function pageGetDom(args) {
       name: el.name || undefined,
       placeholder: el.placeholder || undefined,
       href: el.href || undefined,
-      value: el.value !== undefined && el.value !== '' ? String(el.value).slice(0, 60) : undefined,
+      value:
+        includeValues && !isPassword && el.value !== undefined && el.value !== ''
+          ? redactValue(el.value)
+          : undefined,
       editable: el.isContentEditable || undefined,
       selector: rt ? rt.path(el) : undefined,
       rect: { x: Math.round(rect.left), y: Math.round(rect.top), w: Math.round(rect.width), h: Math.round(rect.height) },
@@ -516,7 +575,9 @@ function pageGetDom(args) {
     title: document.title,
     count: elements.length,
     elements,
-    hint: 'Each element has a stable index — pass it as "index" to click/type/edit_element/delete_element.',
+    hint: includeValues
+      ? 'Each element has a stable index — pass it as "index" to click/type/edit_element/delete_element. Field values were redacted where they looked sensitive.'
+      : 'Each element has a stable index — pass it as "index" to click/type/edit_element/delete_element. Field values are hidden by default — re-run with include_values: true to see them.',
   };
 }
 
@@ -1031,52 +1092,154 @@ function pageGetLinksWithIds() {
   return { url: location.href, count: elements.length, elements };
 }
 
-function pageFindBestLink(args) {
-  const keyword = String((args && args.keyword) || '').trim().toLowerCase();
-  const selector = args && args.selector;
-  let candidates = [];
-  if (selector) {
-    const el = document.querySelector(selector);
-    if (el) {
-      candidates = [{ el, text: (el.innerText || el.textContent || '').trim() }];
-    }
-  } else {
-    const nodes = document.querySelectorAll('a[href]');
-    for (const el of Array.from(nodes)) {
-      const t = ((el.innerText || el.textContent) || '').trim().toLowerCase();
-      if (t && t.includes(keyword)) {
-        candidates.push({
-          el,
-          text: t,
-          href: el.getAttribute('href') || '',
-        });
-      }
-    }
+/**
+ * find_best_link — search the web, RANK the results for the query, and verify
+ * each candidate is reachable. Runs in the extension page (not the tab), so
+ * cross-origin fetches are allowed by host_permissions.
+ */
+async function findBestLink(args) {
+  const query = String((args && args.query) || '').trim();
+  if (!query) throw new Error('find_best_link requires a "query".');
+  const limit = Math.min(Math.max(Number(args.limit) || 5, 1), 10);
+  const verify = args.verify !== false;
+  const engine = searchEngineFor(settings.searchProvider);
+
+  const html = await (async () => {
+    const res = await fetch(engine.url(query), { headers: { 'Accept': 'text/html' } });
+    if (!res.ok) throw new Error(`Search failed (${res.status} ${engine.label}).`);
+    return res.text();
+  })();
+
+  const parsed = parseSearchResults(html, engine);
+  if (!parsed.length) {
+    throw new Error(`No results parsed from ${engine.label} for "${query}". Try web_search instead.`);
   }
-  if (candidates.length === 0) {
-    throw new Error('No link matched keyword: ' + keyword);
-  }
-  // Sort by relevance: exact match first, then by longer text
-  candidates.sort((a, b) => {
-    const aLower = a.text.toLowerCase();
-    const bLower = b.text.toLowerCase();
-    if (aLower === keyword) return -1;
-    if (bLower === keyword) return 1;
-    return b.text.length - a.text.length;
+
+  // --- ranking: score = title hits + snippet hits + source authority + rank ---
+  const terms = query.toLowerCase().split(/\s+/).filter((w) => w.length > 2);
+  const AUTHORITATIVE = /(^|\.)(github\.com|wikipedia\.org|stackoverflow\.com|docs\.|developer\.|learn\.|en\.wikipedia)/i;
+  const DOCSY = /(docs|documentation|guide|reference|api|tutorial|blog)/i;
+  const SEARCH_INTERNAL = /(^|\.)(google|bing|duckduckgo)\.[a-z.]+$/i;
+
+  const scored = parsed.map((r, i) => {
+    let score = 0;
+    const reasons = [];
+    const title = (r.title || '').toLowerCase();
+    const desc = (r.description || '').toLowerCase();
+    const titleHits = terms.filter((t) => title.includes(t)).length;
+    const descHits = terms.filter((t) => desc.includes(t)).length;
+    if (titleHits) {
+      score += titleHits * 2;
+      reasons.push(`matches "${query}" in the title`);
+    }
+    if (descHits) {
+      score += descHits;
+      reasons.push('mentions the topic in its snippet');
+    }
+    let host = '';
+    try { host = new URL(r.href).hostname; } catch {}
+    if (host && SEARCH_INTERNAL.test(host)) score -= 3;
+    if (host && AUTHORITATIVE.test(host)) {
+      score += 1.5;
+      reasons.push(`authoritative source (${host})`);
+    }
+    if (host && DOCSY.test(r.href)) score += 0.5;
+    score += Math.max(0, 4 - i) * 0.5; // top search ranks carry weight
+    if (i === 0 && !(titleHits || descHits)) reasons.push('top result from ' + engine.label);
+    if (!reasons.length) reasons.push(`ranked #${i + 1} by ${engine.label}`);
+    return { ...r, rank: i + 1, host, rawScore: score, reasons };
   });
-  const best = candidates[0];
-  best.el.scrollIntoView({ block: 'center', behavior: 'auto' });
-  if (window.__agentRuntime) {
-    window.__agentRuntime.aim(best.el);
-    window.__agentRuntime.highlight(best.el, '#28a745', 1800);
-  }
-  best.el.click();
+
+  let candidates = scored.filter((r) => /^https?:\/\//i.test(r.href) && r.rawScore > 0);
+  if (!candidates.length) candidates = scored.filter((r) => /^https?:\/\//i.test(r.href)).slice(0, limit);
+  candidates.sort((a, b) => b.rawScore - a.rawScore);
+  candidates = candidates.slice(0, limit);
+
+  const maxScore = Math.max(...candidates.map((c) => c.rawScore), 1);
+
+  // --- verification: does the URL actually respond? ---
+  const results = await Promise.all(
+    candidates.map(async (r) => {
+      let reachable = null;
+      let verification = 'skipped';
+      if (verify) {
+        try {
+          let res = await fetch(r.href, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(4000) });
+          if (!res.ok && (res.status === 405 || res.status === 501)) {
+            res = await fetch(r.href, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(4000) });
+          }
+          reachable = res.ok || res.status < 400;
+          verification = reachable ? `responded (HTTP ${res.status})` : `unreachable (HTTP ${res.status})`;
+        } catch (e) {
+          reachable = false;
+          verification = 'unreachable (' + ((e && e.name) || 'error') + ')';
+        }
+      }
+      return {
+        rank: r.rank,
+        title: r.title,
+        href: r.href,
+        description: r.description,
+        reason: r.reasons.join('; '),
+        relevance: Math.round((r.rawScore / maxScore) * 100) / 100,
+        reachable,
+        verification,
+      };
+    })
+  );
+
+  results.sort((a, b) => {
+    // A dead link never outranks a live one at similar relevance.
+    const av = a.reachable === false ? 1 : 0;
+    const bv = b.reachable === false ? 1 : 0;
+    if (av !== bv) return av - bv;
+    return b.relevance - a.relevance;
+  });
+  results.forEach((r, i) => { r.rank = i + 1; });
+
+  const best = results.find((r) => r.reachable !== false) || results[0];
   return {
-    clicked: true,
-    tag: best.el.tagName.toLowerCase(),
-    text: best.text,
-    href: best.href,
+    query,
+    provider: settings.searchProvider || 'google',
+    source: engine.label,
+    count: results.length,
+    best: best ? best.href : null,
+    results,
+    hint: 'Results are ranked by relevance (0–1) with a reason per link; fetch_url the best one to read it.',
   };
+}
+
+/** Pull organic results out of a search-engine HTML page (best-effort). */
+function parseSearchResults(html, engine) {
+  const out = [];
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const push = (a) => {
+    const href = a.getAttribute('href') || '';
+    const title = (a.textContent || '').trim().replace(/\s+/g, ' ');
+    if (!/^https?:\/\//i.test(href)) return;
+    if (/duckduckgo\.com\/y\.js|google\.com\/url|bing\.com\/ck/i.test(href)) return;
+    if (out.some((r) => r.href === href)) return;
+    const container = a.closest('div, article, li, tr');
+    const descEl = container ? container.querySelector('span, p, .result__snippet, .b_caption p') : null;
+    out.push({
+      href,
+      title: title.slice(0, 200),
+      description: (descEl ? descEl.textContent || '' : '').trim().replace(/\s+/g, ' ').slice(0, 300),
+    });
+  };
+  if (engine.host.includes('google')) {
+    doc.querySelectorAll('a[href^="http"]').forEach((a) => {
+      if (a.querySelector('h3')) push(a); // organic results wrap the title in <h3>
+    });
+    if (!out.length) doc.querySelectorAll('div.g a[href^="http"]').forEach(push);
+  } else if (engine.host.includes('bing')) {
+    doc.querySelectorAll('li.b_algo h2 a[href^="http"]').forEach(push);
+    if (!out.length) doc.querySelectorAll('h2 a[href^="http"]').forEach(push);
+  } else {
+    doc.querySelectorAll('a.result__a[href^="http"], a[href^="http"][data-testid="result-title-a"]').forEach(push);
+    if (!out.length) doc.querySelectorAll('a[href^="http"]').forEach(push);
+  }
+  return out.slice(0, 10);
 }
 
 function pageTypeWithSelection(args) {
@@ -1370,7 +1533,6 @@ const BROWSER_EXECUTORS = {
   key: pageKey,
   scroll: pageScroll,
   get_links: pageGetLinksWithIds,
-  find_best_link: pageFindBestLink,
   type_with_selection: pageTypeWithSelection,
   scroll_smooth: pageScrollSmooth,
   search_on_page: pageSearchOnPage,
@@ -1497,23 +1659,27 @@ async function navigateTab(args) {
 async function searchWeb(args) {
   const q = String((args && args.query) || '').trim();
   if (!q) throw new Error('search requires a query.');
+  const engine = searchEngineFor(settings.searchProvider);
   const tab = await getActiveTab();
   const host = hostnameOf(tab.url);
-  if (!isRestrictedUrl(tab.url) && /(^|\.)google\./i.test(host)) {
+  // Typing into the page's own search box keeps the user in the flow — but
+  // only on the matching engine (a Google page search makes no sense when the
+  // user picked Bing).
+  if (!isRestrictedUrl(tab.url) && host === engine.host) {
     try {
       const r = await executeBrowserTool('search_on_page', { query: q });
       if (r && r.submitted) {
         const changed = await waitForUrlChange(tab.id, 3500);
         if (changed) {
           await waitForTabComplete(tab.id, 10000);
-          return { query: q, typedIntoSearch: true, navigatedTo: changed };
+          return { query: q, provider: engine.label, typedIntoSearch: true, navigatedTo: changed };
         }
       }
     } catch (e) {
       // no search field or submit did not navigate — fall back to a plain URL search
     }
   }
-  return navigateTab({ url: 'https://www.google.com/search?q=' + encodeURIComponent(q) });
+  return navigateTab({ url: engine.url(q), provider: engine.label });
 }
 
 async function executeBrowserTool(name, args) {
@@ -1525,6 +1691,9 @@ async function executeBrowserTool(name, args) {
   }
   if (name === 'search') {
     return searchWeb(args);
+  }
+  if (name === 'find_best_link') {
+    return findBestLink(args);
   }
   if (!chrome.scripting) {
     throw new Error(
@@ -1581,8 +1750,14 @@ async function executeBrowserToolWithRetry(name, args, maxRetries) {
 function browserToolStatus(name, args) {
   const a = args || {};
   switch (name) {
-    case 'search':
-      return '🔍 Searching Google: "' + String(a.query || '').slice(0, 90) + '"';
+    case 'search': {
+      const engine = searchEngineFor(settings.searchProvider);
+      return `🔍 Searching ${engine.label}: "` + String(a.query || '').slice(0, 90) + '"';
+    }
+    case 'find_best_link': {
+      const engine = searchEngineFor(settings.searchProvider);
+      return `🔎 Finding the best link on ${engine.label}: "` + String(a.query || '').slice(0, 80) + '"';
+    }
     case 'search_on_page':
       return '🔍 Filling the search box on the page…';
     case 'navigate':
@@ -1772,6 +1947,86 @@ function looksLikePageEditRequest(text) {
   );
 }
 
+/**
+ * Smarter auto-search: instead of firing a browser search for every message,
+ * only three conditions trigger it up front —
+ *   1. an explicit research request ("look up", "research", "google X"),
+ *   2. a request for current information ("latest", "today", "news", …),
+ *   3. (server-side) the model can't answer confidently — handled by the
+ *      agent's own web-research fallback, not here.
+ * Anything else is left to the model's own judgment.
+ */
+function shouldAutoSearch(text) {
+  const t = String(text || '').trim();
+  if (!t) return { ok: false, reason: 'empty' };
+  if (looksLikePageEditRequest(t)) return { ok: false, reason: 'page-edit' };
+  if (
+    /\b(look\s*up|research|google|web\s*search|search\s+(?:the\s+)?(?:web|online|internet|google|duckduckgo|bing|news)|find\s+me\s|dig\s*up|hunt\s*down)\b/i.test(
+      t
+    )
+  ) {
+    return { ok: true, reason: 'explicit-research' };
+  }
+  if (
+    /\b(latest|breaking|today|tonight|yesterday|this\s+(?:week|month|year)|currently|right\s+now|as\s+of|recent(?:ly)?|news|score[sd]?|weather|stock|price[sd]?|release\s+(?:date|notes)|who\s+(?:won|is\s+leading)|what(?:'s| is)\s+the\s+(?:latest|current)|20(?:2[5-9]|[3-9]\d))\b/i.test(
+      t
+    )
+  ) {
+    return { ok: true, reason: 'current-info' };
+  }
+  return { ok: false, reason: 'model-decides' };
+}
+
+// --- search provider -------------------------------------------------------
+
+const SEARCH_ENGINES = {
+  google: { label: 'Google', host: 'www.google.com', url: (q) => 'https://www.google.com/search?q=' + encodeURIComponent(q) },
+  duckduckgo: { label: 'DuckDuckGo', host: 'duckduckgo.com', url: (q) => 'https://duckduckgo.com/?q=' + encodeURIComponent(q) },
+  bing: { label: 'Bing', host: 'www.bing.com', url: (q) => 'https://www.bing.com/search?q=' + encodeURIComponent(q) },
+};
+
+function searchEngineFor(provider) {
+  return SEARCH_ENGINES[provider] || SEARCH_ENGINES.google;
+}
+
+// --- page context modes ----------------------------------------------------
+
+const CONTEXT_MODE_LABELS = {
+  selection: 'Selected text',
+  visible: 'Visible page',
+  full: 'Full page',
+};
+
+function currentContextMode() {
+  return settings.contextMode === 'selection' || settings.contextMode === 'visible'
+    ? settings.contextMode
+    : 'full';
+}
+
+/** Chip above the composer + summary line inside the Context section. */
+function updateContextIndicator() {
+  const on = settings.includeTab !== false;
+  const mode = currentContextMode();
+  const label = CONTEXT_MODE_LABELS[mode];
+  const chip = $('contextChip');
+  if (chip) {
+    chip.classList.toggle('hidden', !on);
+    chip.textContent = on ? `Context: ${label}` : '';
+  }
+  const indicator = $('contextIndicator');
+  if (indicator) {
+    indicator.textContent = on
+      ? `Will send: ${label} from the active tab (obvious secrets redacted)`
+      : 'Will send: nothing from the page';
+    indicator.dataset.state = on ? 'on' : 'off';
+  }
+  const summary = $('tabSummary');
+  if (summary) {
+    const title = $('tabTitle');
+    summary.textContent = on ? `${label} · ${(title && title.textContent) || 'Active tab'}` : 'Context off';
+  }
+}
+
 // Capture the active tab's content and frame it as context for the model.
 function buildTabContext(snap) {
   const s = snap || {};
@@ -1779,10 +2034,14 @@ function buildTabContext(snap) {
     '[Active browser tab — captured by the extension. This page is open in front of the user right now, so act on it directly with the browser tools (click, type, edit_element, add_element) instead of telling the user to do things manually.]',
     'URL: ' + (s.url || ''),
     'Title: ' + (s.title || ''),
+    s.mode ? 'Captured: ' + (CONTEXT_MODE_LABELS[s.mode] || s.mode) : '',
+    s.empty ? '(The user had nothing selected, so no selection text was captured.)' : '',
     '---',
     s.text || '',
     '[/Active browser tab]',
-  ].join('\n');
+  ]
+    .filter((line) => line !== '')
+    .join('\n');
 }
 
 async function sendMessage(overrideText, options) {
@@ -1803,13 +2062,25 @@ async function sendMessage(overrideText, options) {
   try { document.body.style.cursor = 'progress'; } catch {}
 
   // Optionally read the active browser tab and attach it as context so the
-  // agent can plan and act on the page step by step (like Claude).
+  // agent can plan and act on the page step by step (like Claude). The mode
+  // (selection / visible / full page) comes from Settings → Context.
   let outMessage = text;
+  let capturedFullSnap = null;
   if (settings.includeTab !== false) {
-    appendStatus('🌐 Reading page…');
+    const mode = currentContextMode();
+    appendStatus(mode === 'selection' ? '📄 Reading selection…' : '🌐 Reading page…');
     try {
-      const snap = await executeBrowserTool('get_page', { max_chars: 5000, max_scrolls: 1 });
-      outMessage = buildTabContext(snap) + '\n\n' + text;
+      const snap = await executeBrowserTool('get_page', {
+        max_chars: mode === 'full' ? 5000 : 3000,
+        max_scrolls: mode === 'full' ? 1 : 0,
+        mode,
+      });
+      if (mode === 'full') capturedFullSnap = snap;
+      if (mode === 'selection' && snap && snap.empty) {
+        appendStatus('ℹ Nothing selected — sending without page context');
+      } else {
+        outMessage = buildTabContext(snap) + '\n\n' + text;
+      }
     } catch (e) {
       appendStatus('⚠ Could not read page: ' + ((e && e.message) || e));
       outMessage = text;
@@ -1828,8 +2099,12 @@ async function sendMessage(overrideText, options) {
     try {
       let pageContext = '';
       if (settings.researchMode === 'full' || settings.researchMode === 'summary') {
-        const snap = await executeBrowserTool('get_page', { max_chars: 3000, max_scrolls: 1 });
-        pageContext = snap.text || '';
+        // Reuse the page snapshot captured for context when we already have a
+        // full-page read; only re-read the tab if context was off/selection.
+        const snap =
+          capturedFullSnap ||
+          (await executeBrowserTool('get_page', { max_chars: 3000, max_scrolls: 1 }));
+        pageContext = (snap.text || '').slice(0, 3000);
         if (settings.researchMode === 'summary') {
           const sentences = pageContext.split(/[.!?]+/).filter(s => s.trim().length > 10);
           pageContext = sentences.slice(0, 3).join('. ') + '.';
@@ -1837,10 +2112,10 @@ async function sendMessage(overrideText, options) {
       }
       if (settings.researchMode === 'links') {
         const linksSnap = await executeBrowserTool('get_links');
-        const relevantLinks = linksSnap.links
-          .filter(l => l.text.length > 10)
+        const relevantLinks = (linksSnap.elements || linksSnap.links || [])
+          .filter((l) => (l.text || '').length > 10)
           .slice(0, 5)
-          .map(l => `${l.text}: ${l.href}`)
+          .map((l) => `${l.text}: ${l.href}`)
           .join('\n');
         pageContext = `Relevant links found on page:\n${relevantLinks}`;
       }
@@ -1863,14 +2138,20 @@ async function sendMessage(overrideText, options) {
     outMessage = searchPrompt;
   }
 
+  // Auto-search only fires for research/current-info prompts (see
+  // shouldAutoSearch); everything else is left to the model, which runs its
+  // own web research when it can't answer confidently.
   if (settings.autoSearchOnSend && searchPrompt && !outMessage.includes('google.com/search')) {
-    appendStatus('🔍 Searching with generated prompt…');
-    try {
-      await executeBrowserTool('search', { query: searchPrompt });
-      outMessage = outMessage + '\n\n[Search performed based on your prompt: ' + searchPrompt + ']';
-    } catch (e) {
-      appendStatus('⚠ Search failed: ' + ((e && e.message) || e));
-      outMessage = outMessage + '\n\n[Search failed: ' + (e && e.message || 'unknown error') + ']';
+    const decision = shouldAutoSearch(text);
+    if (decision.ok) {
+      appendStatus(`🔍 Searching (${decision.reason === 'explicit-research' ? 'research request' : 'current info'})…`);
+      try {
+        await executeBrowserTool('search', { query: searchPrompt });
+        outMessage = outMessage + '\n\n[Search performed based on your prompt: ' + searchPrompt + ']';
+      } catch (e) {
+        appendStatus('⚠ Search failed: ' + ((e && e.message) || e));
+        outMessage = outMessage + '\n\n[Search failed: ' + (e && e.message || 'unknown error') + ']';
+      }
     }
   }
 
@@ -1879,6 +2160,8 @@ async function sendMessage(overrideText, options) {
     message: outMessage,
     model: settings.model || undefined,
     autoApprove: settings.autoApprove,
+    searchProvider: settings.searchProvider || undefined,
+    findBestLink: settings.findBestLink !== false,
   };
   // Regenerating rewinds the server-side history so the old answer is not
   // part of the context for the replacement answer.
@@ -1924,6 +2207,7 @@ async function stopRun() {
 
 // ---------------- server / project helpers ----------------
 async function checkHealth() {
+  const healthEl = $('modelHealth');
   try {
     const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/health`);
     const data = await res.json();
@@ -1931,15 +2215,27 @@ async function checkHealth() {
     if (data.ok) {
       connEl.textContent = 'connected';
       connEl.className = 'conn ok';
+      if (healthEl) {
+        healthEl.textContent = 'ollama online';
+        healthEl.dataset.state = 'yes';
+      }
       loadModels(); // Load models when server is up
     } else {
       connEl.textContent = 'ollama unreachable';
       connEl.className = 'conn err';
+      if (healthEl) {
+        healthEl.textContent = 'ollama unreachable';
+        healthEl.dataset.state = 'no';
+      }
     }
   } catch (e) {
     const connEl = $('conn');
     connEl.textContent = 'server offline';
     connEl.className = 'conn err';
+    if (healthEl) {
+      healthEl.textContent = 'server offline';
+      healthEl.dataset.state = 'no';
+    }
   }
 }
 
@@ -2027,6 +2323,7 @@ async function loadModels() {
     const data = await res.json();
     if (data.ok && Array.isArray(data.models) && data.models.length > 0) {
       models = data.models;
+      modelDetailsCache = Array.isArray(data.details) ? data.details : [];
       const sel = $('modelSelect');
       fillModelSelect(sel, models, data.details);
       const local = models.filter((m) => !isCloudModel(m));
@@ -2049,6 +2346,8 @@ async function loadModels() {
       sel.title = `${models.length} Ollama models installed — current: ${settings.model || 'none'}`;
       updateStatusModel();
       updateActionButtons();
+      updatePresetHighlight();
+      loadModelInfo(settings.model);
     } else {
       // If no models are found, show error message in UI
       const connEl = $('conn');
@@ -2068,6 +2367,188 @@ async function loadModels() {
   }
 }
 
+// ---------------- model capabilities & presets ----------------
+/**
+ * Real capability data for the selected model, from the server's /model_info
+ * (backed by Ollama /api/show): context window length, tools/thinking/vision
+ * flags. "Unknown" is shown when the install is too old to report — the UI
+ * never guesses from the model's name.
+ */
+let currentModelInfo = null;
+
+async function loadModelInfo(name) {
+  const ctxEl = $('modelCtx');
+  const toolsEl = $('modelTools');
+  const thinkingEl = $('modelThinking');
+  if (!ctxEl && !toolsEl) return;
+  if (!name) {
+    currentModelInfo = null;
+    if (ctxEl) ctxEl.textContent = 'ctx —';
+    if (toolsEl) {
+      toolsEl.textContent = 'tools —';
+      toolsEl.dataset.state = 'unknown';
+    }
+    if (thinkingEl) thinkingEl.textContent = 'thinking —';
+    return;
+  }
+  if (ctxEl) ctxEl.textContent = 'ctx …';
+  if (toolsEl) {
+    toolsEl.textContent = 'tools …';
+    toolsEl.dataset.state = 'unknown';
+  }
+  try {
+    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/model_info?name=${encodeURIComponent(name)}`);
+    const info = await res.json();
+    if (!info.ok || (settings.model && info.name !== settings.model)) return;
+    currentModelInfo = info;
+    if (ctxEl) {
+      ctxEl.textContent = info.contextLength ? `ctx ${Number(info.contextLength).toLocaleString()}` : 'ctx —';
+      ctxEl.title = info.contextLength
+        ? `Context window reported by Ollama: ${info.contextLength} tokens`
+        : 'Ollama did not report a context length for this model';
+    }
+    if (toolsEl) {
+      const t = info.tools;
+      toolsEl.textContent = t === true ? 'tools yes' : t === false ? 'tools no' : 'tools unknown';
+      toolsEl.dataset.state = t === true ? 'yes' : t === false ? 'no' : 'unknown';
+      toolsEl.title =
+        t === true
+          ? 'Ollama reports native tool calling for this model'
+          : t === false
+            ? 'Ollama reports no tool support — file/browser tools will not be sent to this model'
+            : 'This Ollama install does not report capabilities — tool support is unknown';
+    }
+    if (thinkingEl) {
+      const th = info.thinking;
+      thinkingEl.textContent = th === true ? 'thinking yes' : th === false ? 'thinking no' : 'thinking unknown';
+      thinkingEl.dataset.state = th === true ? 'yes' : th === false ? 'no' : 'unknown';
+    }
+  } catch (e) {
+    if (ctxEl) ctxEl.textContent = 'ctx —';
+    if (toolsEl) {
+      toolsEl.textContent = 'tools unknown';
+      toolsEl.dataset.state = 'unknown';
+    }
+  }
+}
+
+// Quick presets: pick the best installed model for a job using REAL
+// capabilities (tools/vision/context), never name matching alone.
+let modelDetailsCache = [];
+
+function scoreModelForPreset(d, preset) {
+  const caps = Array.isArray(d.capabilities) ? d.capabilities : [];
+  const b = paramBillions(d.parameterSize);
+  const size = b == null ? 6 : b;
+  let score = 0;
+  if (preset === 'coding') {
+    if (caps.includes('tools')) score += 6;
+    score += Math.min(size, 14); // bigger local models code better, up to a point
+    if (isCloudModel(d.name)) score -= 4;
+    if (d.family && /qwen|codellama|deepseek|starcoder|llama/.test(d.family)) score += 1;
+  } else if (preset === 'research') {
+    if (caps.includes('tools')) score += 4;
+    if (typeof d.contextLength === 'number') score += Math.min(d.contextLength / 4096, 8);
+    score += Math.min(size, 12);
+    if (isCloudModel(d.name)) score -= 4;
+  } else {
+    // general: fast + good instructions; tools not required
+    score += Math.max(0, 10 - Math.abs(size - 8)); // sweet spot around 8B
+    if (caps.includes('thinking')) score += 1;
+    if (isCloudModel(d.name)) score -= 4;
+  }
+  return score;
+}
+
+function pickModelFor(preset, details) {
+  const list = (details || modelDetailsCache).filter((d) => d && !isCloudModel(d.name));
+  if (!list.length) return null;
+  return [...list].sort((a, b) => scoreModelForPreset(b, preset) - scoreModelForPreset(a, preset))[0].name;
+}
+
+function updatePresetHighlight() {
+  const active = settings.model || '';
+  for (const btn of document.querySelectorAll('.preset-btn')) {
+    const preset = btn.dataset.preset;
+    btn.classList.toggle('active', !!active && pickModelFor(preset) === active);
+  }
+}
+
+function applyPreset(preset) {
+  const name = pickModelFor(preset);
+  if (!name) {
+    appendStatus('✖ No local models available for this preset.');
+    return;
+  }
+  settings.model = name;
+  saveSettings();
+  const sel = $('modelSelect');
+  if (sel) sel.value = name;
+  updateStatusModel();
+  updatePresetHighlight();
+  loadModelInfo(name);
+  appendStatus(`Model set for ${preset}: ${name}`);
+}
+
+// ---------------- project connection ----------------
+let projectPollTimer = null;
+
+const PROJECT_STATUS_LABELS = {
+  'not-connected': 'Not connected',
+  indexing: 'Indexing…',
+  connected: 'Connected',
+  error: 'Index error',
+};
+
+/** Paint the connection pill + summary from a /project (or /health) payload. */
+function updateProjectPill(data) {
+  const root = (data && data.root) || '';
+  const status = root ? (data && data.status) || 'connected' : 'not-connected';
+  const pill = $('projectStatus');
+  const label = $('projectStatusText');
+  const nameEl = $('projectName');
+  const meta = $('projectMeta');
+  const reindexBtn = $('reindexProject');
+  if (pill) pill.dataset.state = status;
+  if (label) {
+    const base = PROJECT_STATUS_LABELS[status] || status;
+    const files = data && typeof data.fileCount === 'number' ? data.fileCount : null;
+    label.textContent = status === 'connected' && files != null ? `${base} · ${files} files` : base;
+  }
+  if (nameEl) {
+    nameEl.textContent = root ? (data.name || root.split(/[\\/]/).filter(Boolean).pop() || '') : '';
+  }
+  if (meta) {
+    const bits = [];
+    if (data && data.truncated) bits.push('scanned (capped)');
+    if (data && data.error) bits.push('error: ' + data.error);
+    meta.textContent = bits.join(' · ');
+  }
+  if (reindexBtn) reindexBtn.disabled = !root || status === 'indexing';
+  const summary = $('projectSummary');
+  if (summary) {
+    summary.textContent = root
+      ? `${PROJECT_STATUS_LABELS[status] || status} · ${nameEl ? nameEl.textContent : ''}`
+      : 'Not set';
+  }
+  if (root) settings.projectRoot = root;
+}
+
+/** Poll GET /project while the server is scanning; one shot otherwise. */
+async function refreshProjectStatus({ poll = true } = {}) {
+  try {
+    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/project`);
+    const data = await res.json();
+    updateProjectPill(data.ok ? data : null);
+    clearTimeout(projectPollTimer);
+    if (poll && data.status === 'indexing') {
+      projectPollTimer = setTimeout(() => refreshProjectStatus({ poll: true }), 1200);
+    }
+  } catch (e) {
+    updateProjectPill(null);
+  }
+}
+
 async function setProject() {
   const root = $('projectRoot').value.trim();
   if (!root) return;
@@ -2080,24 +2561,52 @@ async function setProject() {
     const data = await res.json();
     if (!data.ok) {
       appendStatus('✖ ' + data.error);
+      const pill = $('projectStatus');
+      if (pill) pill.dataset.state = 'error';
+      const label = $('projectStatusText');
+      if (label) label.textContent = data.error || 'Connect failed';
       return;
     }
     settings.projectRoot = data.root;
     saveSettings();
-    $('projectSummary').textContent = data.root;
-    appendStatus('Project set: ' + data.root);
+    updateProjectPill(data);
+    refreshProjectStatus(); // follow the background scan to completion
+    appendStatus('Project connected: ' + data.root);
   } catch (e) {
     appendStatus('✖ Could not reach server to set project. Please ensure Ollama is running.');
   }
 }
 
+async function reindexProject() {
+  if (!settings.projectRoot) return;
+  const btn = $('reindexProject');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/project/index`, { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) {
+      appendStatus('✖ ' + data.error);
+      if (btn) btn.disabled = false;
+      return;
+    }
+    updateProjectPill(data);
+    refreshProjectStatus();
+  } catch (e) {
+    appendStatus('✖ Could not reach server to re-index.');
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function applyProject(root) {
   try {
-    await fetch(`${settings.serverUrl || DEFAULT_SERVER}/project`, {
+    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/project`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ root }),
     });
+    const data = await res.json();
+    if (data.ok) updateProjectPill(data);
+    refreshProjectStatus();
   } catch (e) {
     // server may be offline
   }
@@ -2121,10 +2630,7 @@ async function refreshActiveTabProfile() {
     const url = (tab.url || 'chrome://newtab').trim() || 'chrome://newtab';
     titleEl.textContent = title;
     urlEl.textContent = url;
-    if (summary) {
-      const include = $('includeTab');
-      summary.textContent = include && include.checked ? title : 'Context off';
-    }
+    updateContextIndicator();
     updateTabFavicon(tab, url);
   } catch (e) {
     $('tabTitle').textContent = 'Active tab unavailable';
@@ -2300,6 +2806,8 @@ function init() {
     settings.model = e.target.value;
     saveSettings();
     updateStatusModel();
+    updatePresetHighlight();
+    loadModelInfo(settings.model);
   });
   $('autoApprove').addEventListener('change', (e) => {
     settings.autoApprove = e.target.checked;
@@ -2308,9 +2816,31 @@ function init() {
   $('includeTab').addEventListener('change', (e) => {
     settings.includeTab = e.target.checked;
     saveSettings();
-    const summary = $('tabSummary');
-    if (summary) summary.textContent = e.target.checked ? $('tabTitle').textContent : 'Context off';
+    updateContextIndicator();
   });
+  if ($('contextMode')) {
+    $('contextMode').addEventListener('change', (e) => {
+      settings.contextMode = e.target.value;
+      saveSettings();
+      updateContextIndicator();
+    });
+  }
+  if ($('searchProvider')) {
+    $('searchProvider').addEventListener('change', (e) => {
+      settings.searchProvider = e.target.value;
+      saveSettings();
+    });
+  }
+  if ($('reindexProject')) {
+    $('reindexProject').addEventListener('click', reindexProject);
+  }
+  const presetRow = document.querySelector('.preset-row');
+  if (presetRow) {
+    presetRow.addEventListener('click', (e) => {
+      const btn = e.target.closest('.preset-btn');
+      if (btn && btn.dataset.preset) applyPreset(btn.dataset.preset);
+    });
+  }
   $('autoSearch').addEventListener('change', (e) => {
     settings.autoSearchOnSend = e.target.checked;
     saveSettings();
@@ -2335,6 +2865,7 @@ function init() {
 
   loadSettings().then(() => {
     if (settings.projectRoot) applyProject(settings.projectRoot);
+    else refreshProjectStatus();
     checkHealth();
     loadModels();
   });

@@ -42,6 +42,18 @@
           </div>
           <button id="refreshModels" class="btn secondary icon" title="Refresh models" aria-label="Refresh models">⟳</button>
         </div>
+        <div class="model-meta" id="modelMeta" aria-live="polite">
+          <span class="meta-chip" id="modelCtx" title="Context window reported by Ollama">ctx —</span>
+          <span class="meta-chip" id="modelTools" data-state="unknown" title="Native tool calling support reported by Ollama">tools —</span>
+          <span class="meta-chip" id="modelThinking" data-state="unknown" title="Thinking-stream support reported by Ollama">thinking —</span>
+          <span class="meta-chip" id="modelHealth" data-state="unknown" title="Ollama server reachability">ollama —</span>
+        </div>
+        <div class="preset-row" role="group" aria-label="Pick a model for a job">
+          <button type="button" class="btn secondary preset-btn" data-preset="coding" title="Best local model for writing and editing code (tools + size)">⌘ Coding</button>
+          <button type="button" class="btn secondary preset-btn" data-preset="general" title="Balanced everyday assistant (around 8B)">✦ General</button>
+          <button type="button" class="btn secondary preset-btn" data-preset="research" title="Tools + big context for web research">⌕ Research</button>
+        </div>
+        <p class="hint">Capabilities are read from Ollama itself — never guessed from the model name. Presets pick the best installed local model for the job.</p>
       </div>
     </details>
 
@@ -63,6 +75,15 @@
           <input id="includeTab" type="checkbox" checked />
           Read active tab into context
         </label>
+        <div class="control-group">
+          <span class="label">Send to the model</span>
+          <select id="contextMode" title="How much of the active tab is attached to each message">
+            <option value="selection">Selected text only</option>
+            <option value="visible">Visible page content</option>
+            <option value="full" selected>Full page content</option>
+          </select>
+        </div>
+        <div class="context-indicator" id="contextIndicator" data-state="on" aria-live="polite">Will send: Full page from the active tab (obvious secrets redacted)</div>
       </div>
     </details>
 
@@ -72,10 +93,17 @@
         <span class="summary-value" id="projectSummary">Not set</span>
       </summary>
       <div class="section-body">
+        <div class="proj-status" id="projectStatus" data-state="not-connected">
+          <span class="proj-dot" aria-hidden="true"></span>
+          <span id="projectStatusText">Not connected</span>
+          <span class="proj-name" id="projectName"></span>
+        </div>
         <div class="input-row">
           <input id="projectRoot" type="text" placeholder="C:\path\to\your\project" />
-          <button id="setProject" class="btn secondary">Set</button>
+          <button id="setProject" class="btn secondary">Connect</button>
+          <button id="reindexProject" class="btn secondary icon" title="Re-scan the project tree" aria-label="Re-index project" disabled>⟳</button>
         </div>
+        <div class="proj-meta" id="projectMeta"></div>
       </div>
     </details>
 
@@ -89,17 +117,26 @@
           <div class="auto-row">
             <label class="checkbox">
               <input id="autoSearch" type="checkbox" />
-              Auto-search Google with my prompt
+              Auto-search for research &amp; current info
             </label>
             <label class="checkbox">
-              <input id="findBestLink" type="checkbox" />
-              Find best link
+              <input id="findBestLink" type="checkbox" checked />
+              Rank &amp; verify links (find best link)
             </label>
             <label class="checkbox">
               <input id="autoPrompt" type="checkbox" checked />
               Auto-fill prompt with page context
             </label>
           </div>
+          <p class="hint">Auto-search only fires for research requests ("look up…") or current info ("latest…"). Anything else is left to the model, which searches on its own when it can't answer confidently.</p>
+        </div>
+        <div class="control-group">
+          <span class="label">Search engine</span>
+          <select id="searchProvider" title="Engine used for auto-search, the search tool, and link ranking">
+            <option value="google">Google</option>
+            <option value="duckduckgo">DuckDuckGo</option>
+            <option value="bing">Bing</option>
+          </select>
         </div>
         <div class="control-group">
           <span class="label">Research</span>
@@ -157,9 +194,14 @@
   </section>
 
   <footer class="composer">
-    <textarea id="input" rows="1" placeholder="Ask anything…  ⏎ send"></textarea>
-    <div class="composer-actions">
-      <button id="send" class="send-btn">➤</button>
+    <div class="composer-meta">
+      <span class="context-chip" id="contextChip">Context: Full page</span>
+    </div>
+    <div class="composer-row">
+      <textarea id="input" rows="1" placeholder="Ask anything…  ⏎ send"></textarea>
+      <div class="composer-actions">
+        <button id="send" class="send-btn">➤</button>
+      </div>
     </div>
   </footer>
 

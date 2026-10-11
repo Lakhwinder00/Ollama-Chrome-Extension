@@ -359,7 +359,7 @@ details.section[open] > summary {
 .control-group.row > select { flex: 1 1 auto; min-width: 0; }
 
 /* --- Toggle switches (checkbox inputs) --- */
-.control-group .checkbox {
+.section-body .checkbox {
   position: relative;
   display: flex;
   align-items: center;
@@ -371,7 +371,7 @@ details.section[open] > summary {
   cursor: pointer;
   user-select: none;
 }
-.control-group .checkbox input {
+.section-body .checkbox input {
   position: absolute;
   left: 0;
   top: 50%;
@@ -391,18 +391,18 @@ details.section[open] > summary {
   cursor: pointer;
   transition: background-color var(--transition), background-position var(--transition);
 }
-.control-group .checkbox input:checked {
+.section-body .checkbox input:checked {
   background-color: var(--accent);
   background-position: 18px center;
 }
-.control-group .checkbox input:focus-visible { box-shadow: var(--focus); }
-.control-group .checkbox:hover input { background-color: var(--accent-2); }
+.section-body .checkbox input:focus-visible { box-shadow: var(--focus); }
+.section-body .checkbox:hover input { background-color: var(--accent-2); }
 
 .auto-row { display: flex; flex-direction: column; gap: 7px; }
 
 /* --- Selects --- */
 .select-wrapper { position: relative; width: 100%; }
-.control-group select {
+.section-body select {
   width: 100%;
   background-color: var(--surface-2);
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%2364748b' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
@@ -419,8 +419,8 @@ details.section[open] > summary {
   -webkit-appearance: none;
   transition: border-color var(--transition), box-shadow var(--transition), background-color var(--transition);
 }
-.control-group select:hover { border-color: var(--accent-2); background-color: #fff; }
-.control-group select:focus {
+.section-body select:hover { border-color: var(--accent-2); background-color: #fff; }
+.section-body select:focus {
   outline: none;
   background-color: #fff;
   border-color: var(--accent);
@@ -507,6 +507,92 @@ details.section[open] > summary {
 /* --- Bars --- */
 .model-row { display: flex; align-items: center; gap: 6px; }
 .model-row .select-wrapper { flex: 1; }
+
+/* Model capability chips — real data from Ollama, "unknown" never guessed. */
+.model-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.meta-chip {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.02em;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2.5px 8px;
+  white-space: nowrap;
+}
+.meta-chip[data-state="yes"] { color: var(--success); border-color: rgba(21, 128, 61, 0.35); background: rgba(21, 128, 61, 0.08); }
+.meta-chip[data-state="no"] { color: var(--danger); border-color: rgba(225, 29, 72, 0.3); background: var(--danger-soft); }
+.meta-chip[data-state="unknown"] { color: var(--text-3); }
+
+.preset-row { display: flex; gap: 6px; margin-top: 9px; }
+.preset-row .preset-btn { flex: 1 1 0; padding: 6px 4px; font-size: 11px; }
+.preset-btn.active {
+  color: var(--accent-ink);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.hint {
+  margin-top: 8px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+
+/* Project connection pill */
+.proj-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  margin-bottom: 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.proj-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-3);
+  flex-shrink: 0;
+}
+.proj-status[data-state="connected"] .proj-dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.proj-status[data-state="connected"] { color: var(--text); }
+.proj-status[data-state="indexing"] .proj-dot { background: var(--indigo); animation: pulse 1.2s ease-out infinite; }
+.proj-status[data-state="error"] .proj-dot { background: var(--danger); }
+.proj-status[data-state="error"] { color: var(--danger); }
+.proj-name {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 45%;
+}
+.proj-meta { margin-top: 6px; font-size: 10px; color: var(--text-3); }
+
+/* Context mode indicator (inside the Context section) */
+.context-indicator {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-strong);
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.context-indicator[data-state="on"] {
+  border-style: solid;
+  border-color: rgba(0, 184, 148, 0.35);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
 
 .project-row { display: flex; gap: 6px; align-items: center; }
 .project-row .input-row { width: 100%; }
@@ -995,13 +1081,25 @@ details.section[open] > summary {
 .composer {
   flex: 0 0 auto;
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px));
   background: rgba(255, 255, 255, 0.94);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-top: 1px solid var(--border);
+}
+.composer-row { display: flex; align-items: flex-end; gap: 8px; }
+.composer-meta { display: flex; align-items: center; min-height: 0; }
+.composer-meta:empty { display: none; }
+.context-chip {
+  font-size: 10px;
+  font-family: var(--mono);
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border: 1px solid rgba(0, 184, 148, 0.3);
+  border-radius: 999px;
+  padding: 2px 9px;
 }
 .composer textarea {
   flex: 1;

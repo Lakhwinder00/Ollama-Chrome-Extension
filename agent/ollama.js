@@ -110,6 +110,46 @@ async function modelCapabilities() {
   return map;
 }
 
+/**
+ * Deep detail for ONE model via Ollama's /api/show — the only place that
+ * reports the real context window length and the capability list. Returns
+ * { name, contextLength, capabilities, tools, thinking, vision, family,
+ *   parameterSize, quantization, size } with nulls where Ollama didn't say.
+ * Older Ollama builds accept only `name`; newer ones prefer `model`.
+ */
+async function showModel(name) {
+  if (typeof name !== 'string' || !name.trim()) throw new Error('showModel requires a model name.');
+  const trimmed = name.trim();
+  const res = await ollamaFetch('/api/show', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: trimmed, name: trimmed }),
+  });
+  const data = await res.json();
+  const info = (data && data.model_info) || {};
+  const details = (data && data.details) || {};
+  const capabilities = Array.isArray(data.capabilities) ? data.capabilities : [];
+  const ctxCandidates = [info.context_length, info['context_length'], info.model?.context_length]
+    .filter((v) => typeof v === 'number' && v > 0);
+  return {
+    name: trimmed,
+    contextLength: ctxCandidates.length ? ctxCandidates[0] : null,
+    capabilities,
+    tools: capabilities.includes('tools') ? true : capabilities.length ? false : null,
+    thinking: capabilities.includes('thinking') ? true : capabilities.length ? false : null,
+    vision: capabilities.includes('vision') ? true : capabilities.length ? false : null,
+    family: details.family || null,
+    parameterSize: details.parameter_size || null,
+    quantization: details.quantization_level || null,
+    size:
+      typeof data.size === 'number'
+        ? data.size
+        : typeof info.size === 'number'
+          ? info.size
+          : null,
+  };
+}
+
 module.exports = {
   DEFAULT_OLLAMA_URL,
   NUM_CTX,
@@ -121,6 +161,7 @@ module.exports = {
   chat,
   chatStream,
   modelCapabilities,
+  showModel,
 };
 
 /** Strip special tokens some models leak into their visible output. */

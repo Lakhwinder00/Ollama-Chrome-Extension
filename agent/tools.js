@@ -41,11 +41,123 @@ function setProjectRoot(root) {
   if (!fs.existsSync(resolved)) throw new Error(`Project root does not exist: ${resolved}`);
   if (!fs.statSync(resolved).isDirectory()) throw new Error(`Project root is not a directory: ${resolved}`);
   projectRoot = resolved;
+  resetProjectIndex('connected'); // server kicks off indexProject() right after
   return projectRoot;
 }
 
 function getProjectRoot() {
   return projectRoot;
+}
+
+// ---------------------------------------------------------------------------
+// Project connection status: a lightweight scan of the project tree that
+// powers the extension's "Not connected / Connected / Indexing" pill and the
+// file count. It deliberately stores only relative paths — no embeddings, no
+// content — so it is cheap to rebuild and safe to keep in memory.
+// ---------------------------------------------------------------------------
+const MAX_INDEX_FILES = 5000;
+
+let projectIndex = {
+  status: projectRoot ? 'connected' : 'not-connected',
+  root: null,
+  name: '',
+  files: [],
+  fileCount: 0,
+  scanned: 0,
+  truncated: false,
+  startedAt: null,
+  finishedAt: null,
+  error: null,
+};
+let indexRun = 0;
+
+function resetProjectIndex(status) {
+  projectIndex = {
+    status,
+    root: projectRoot,
+    name: projectRoot ? path.basename(projectRoot) : '',
+    files: [],
+    fileCount: 0,
+    scanned: 0,
+    truncated: false,
+    startedAt: status === 'indexing' ? new Date().toISOString() : null,
+    finishedAt: null,
+    error: null,
+  };
+}
+
+/** Current connection status (never leaks absolute paths beyond the root). */
+function getProjectIndex() {
+  return {
+    status: projectRoot ? projectIndex.status : 'not-connected',
+    root: projectRoot,
+    name: projectRoot ? path.basename(projectRoot) : '',
+    fileCount: projectIndex.fileCount,
+    scanned: projectIndex.scanned,
+    truncated: projectIndex.truncated,
+    startedAt: projectIndex.startedAt,
+    finishedAt: projectIndex.finishedAt,
+    error: projectIndex.error,
+  };
+}
+
+/** Walk the project tree (skipping build/VCS dirs) and refresh the index. */
+async function indexProject() {
+  if (!projectRoot) {
+    resetProjectIndex('not-connected');
+    return getProjectIndex();
+  }
+  const run = ++indexRun;
+  const root = path.resolve(projectRoot);
+  resetProjectIndex('indexing');
+
+  const files = [];
+  let scanned = 0;
+
+  const walk = async (dir) => {
+    if (run !== indexRun || scanned >= MAX_INDEX_FILES) return;
+    let entries;
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // unreadable directory — skip, the rest of the scan still counts
+    }
+    for (const entry of entries) {
+      if (run !== indexRun || scanned >= MAX_INDEX_FILES) return;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue;
+        await walk(full);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      scanned++;
+      files.push(path.relative(root, full));
+    }
+  };
+
+  try {
+    await walk(root);
+    if (run !== indexRun) return getProjectIndex(); // a newer scan superseded this one
+    projectIndex = {
+      ...projectIndex,
+      status: 'connected',
+      files,
+      fileCount: files.length,
+      scanned,
+      truncated: scanned >= MAX_INDEX_FILES,
+      finishedAt: new Date().toISOString(),
+    };
+  } catch (e) {
+    if (run !== indexRun) return getProjectIndex();
+    projectIndex = {
+      ...projectIndex,
+      status: 'error',
+      error: String((e && e.message) || e),
+      finishedAt: new Date().toISOString(),
+    };
+  }
+  return getProjectIndex();
 }
 
 function relativePath(abs) {
@@ -247,11 +359,6 @@ function htmlDecode(s) {
     .trim();
 }
 
-async function web_search(args) {
-  const query = String((args && args.query) || '').trim();
-  return webSearch(query, searchProvider);
-}
-
 // The user picks a search engine in the extension (Settings → Automation);
 // the server applies it to every web_search call for this process.
 let searchProvider = 'duckduckgo';
@@ -263,6 +370,11 @@ function setSearchProvider(provider) {
 
 function getSearchProvider() {
   return searchProvider;
+}
+
+async function web_search(args) {
+  const query = String((args && args.query) || '').trim();
+  return webSearch(query, searchProvider);
 }
 
 async function fetch_url(args) {
@@ -448,6 +560,7 @@ const BROWSER_TOOLS = new Set([
   'screenshot',
   'navigate',
   'search',
+  'find_best_link',
   'edit_element',
   'add_element',
   'delete_element',
@@ -536,6 +649,23 @@ const TOOL_DEFINITIONS = [
         type: 'object',
         properties: {
           query: { type: 'string', description: 'The search query.' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'find_best_link',
+      description:
+        'Search the web, then rank the results for the query and verify each link is reachable. Returns ranked candidates with title, URL, snippet, relevance score, a plain-language reason, and a reachability verdict — use it instead of web_search when you need THE single best link to fetch or cite. `query` must be a SHORT search phrase (max ~10 words).',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'The search query.' },
+          limit: { type: 'integer', description: 'How many ranked candidates to return (default 5, max 10).' },
+          verify: { type: 'boolean', description: 'Check each URL responds before ranking (default true).' },
         },
         required: ['query'],
       },
@@ -880,4 +1010,8 @@ module.exports = {
   TOOL_FUNCTIONS,
   TOOL_DEFINITIONS,
   BROWSER_TOOLS,
+  setSearchProvider,
+  getSearchProvider,
+  indexProject,
+  getProjectIndex,
 };

@@ -3,10 +3,11 @@
  * Free Research MCP server — 100% free, no API keys, no charges.
  *
  * Implements the Model Context Protocol (stdio transport, JSON-RPC 2.0) and
- * exposes three research tools:
- *   - web_search(query)  → Google top results
- *   - fetch_page(url)    → readable text of a web page
- *   - wikipedia(query)   → Wikipedia summary of the top article
+ * exposes four research tools:
+ *   - web_search(query)   → DuckDuckGo/Bing top results with snippets
+ *   - fetch_page(url)     → readable plain text of a web page
+ *   - wikipedia(query)    → Wikipedia summary of the top article
+ *   - deep_research(query) → multi-query, multi-source research bundle
  *
  * Usage (Claude Desktop claude_desktop_config.json):
  *   {
@@ -20,10 +21,10 @@
  */
 
 const readline = require('readline');
-const { webSearch, fetchPageText } = require('../agent/web');
+const { webSearch, fetchPageText, sanitizeSearchQuery } = require('../agent/web');
 
 const SERVER_NAME = 'free-research-mcp';
-const SERVER_VERSION = '1.0.0';
+const SERVER_VERSION = '1.1.0';
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
@@ -54,23 +55,105 @@ async function wikipedia(query) {
   };
 }
 
+function clampInt(value, fallback, min, max) {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function buildResearchQueries(query, maxQueries) {
+  const base = sanitizeSearchQuery(query);
+  const variants = [
+    base,
+    base + ' overview',
+    base + ' official documentation',
+    base + ' latest news',
+    base + ' comparison',
+  ];
+  return variants.slice(0, Math.max(1, maxQueries));
+}
+
+async function deepResearch(args = {}) {
+  const query = sanitizeSearchQuery(args.query);
+  if (!query) throw new Error('deep_research requires a "query".');
+  const maxQueries = clampInt(args.max_queries, 3, 1, 5);
+  const maxSources = clampInt(args.max_sources, 5, 1, 8);
+  const queries = buildResearchQueries(query, maxQueries);
+
+  const seen = new Set();
+  const sources = [];
+  const searchErrors = [];
+
+  for (const q of queries) {
+    try {
+      const result = await webSearch(q);
+      for (const r of result.results || []) {
+        if (!r || !r.url || seen.has(r.url)) continue;
+        seen.add(r.url);
+        sources.push({
+          title: r.title || r.url,
+          url: r.url,
+          snippet: r.snippet || '',
+          query: result.query || q,
+          provider: result.provider || result.source || 'unknown',
+        });
+      }
+    } catch (e) {
+      searchErrors.push(`${q}: ${e.message}`);
+    }
+  }
+
+  if (!sources.length) {
+    throw new Error('No research sources found. ' + searchErrors.join('; '));
+  }
+
+  const limited = sources.slice(0, maxSources);
+  for (const source of limited) {
+    try {
+      source.excerpt = (await fetchPageText(source.url)).slice(0, 2000);
+    } catch (e) {
+      source.error = e.message;
+    }
+  }
+
+  let wiki = null;
+  try {
+    wiki = await wikipedia(query);
+  } catch {
+    wiki = null;
+  }
+
+  return JSON.stringify(
+    {
+      query,
+      searched_queries: queries,
+      source_count: limited.length,
+      sources: limited.map((s, i) => ({ rank: i + 1, ...s })),
+      wikipedia: wiki,
+      search_errors: searchErrors,
+    },
+    null,
+    2
+  );
+}
+
 const TOOLS = [
   {
     name: 'web_search',
     description:
-      'Search the web on Google and return the top related results with titles and URLs.',
+      'Search the web using DuckDuckGo or Bing without API keys and return the top related results with titles, snippets, and URLs.',
     inputSchema: {
       type: 'object',
-      properties: { query: { type: 'string', description: 'The search query.' } },
+      properties: { query: { type: 'string', description: 'The search query. Use a few short keywords.' } },
       required: ['query'],
     },
   },
   {
     name: 'fetch_page',
-    description: 'Fetch a web page URL and return its readable text.',
+    description: 'Fetch a web page URL and return readable plain text, truncated to 8000 characters.',
     inputSchema: {
       type: 'object',
-      properties: { url: { type: 'string', description: 'Full URL to fetch.' } },
+      properties: { url: { type: 'string', description: 'Full http(s) URL to fetch.' } },
       required: ['url'],
     },
   },
@@ -83,12 +166,27 @@ const TOOLS = [
       required: ['query'],
     },
   },
+  {
+    name: 'deep_research',
+    description:
+      'Run a deeper free web research pass: search several query angles, collect multiple unique sources, fetch short excerpts from the top sources, and include Wikipedia context when available. Use this instead of web_search for complex, current, comparison, or multi-source questions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'The research question or topic.' },
+        max_sources: { type: 'integer', description: 'Maximum sources to fetch (1-8, default 5).' },
+        max_queries: { type: 'integer', description: 'Maximum search angles to run (1-5, default 3).' },
+      },
+      required: ['query'],
+    },
+  },
 ];
 
 async function callTool(name, args) {
   if (name === 'web_search') return JSON.stringify(await webSearch(args.query), null, 2);
   if (name === 'fetch_page') return await fetchPageText(args.url);
   if (name === 'wikipedia') return JSON.stringify(await wikipedia(args.query), null, 2);
+  if (name === 'deep_research') return deepResearch(args);
   throw new Error('Unknown tool: ' + name);
 }
 

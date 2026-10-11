@@ -12,7 +12,14 @@ const http = require('http');
 const { URL } = require('url');
 const { OllamaProvider } = require('./provider');
 const { loadAlwaysAllowed, allowAlways } = require('./permissions');
-const { setProjectRoot, getProjectRoot, TOOL_DEFINITIONS } = require('./tools');
+const {
+  setProjectRoot,
+  getProjectRoot,
+  TOOL_DEFINITIONS,
+  setSearchProvider,
+  indexProject,
+  getProjectIndex,
+} = require('./tools');
 const { runAgent } = require('./agent');
 
 const PORT = Number(process.env.PORT) || 8787;
@@ -138,11 +145,60 @@ function readJson(req) {
 async function handleProject(req, res) {
   const body = await readJson(req);
   try {
-    const root = setProjectRoot(body.root);
-    sendJson(res, 200, { ok: true, root });
+    setProjectRoot(body.root);
+    // Kick off the lightweight scan that drives the extension's connection
+    // pill ("Indexing" → "Connected (N files)"). Failures stay in the status
+    // object; they never fail the connect itself.
+    indexProject().catch(() => {});
+    sendJson(res, 200, { ok: true, ...getProjectIndex() });
   } catch (e) {
     sendJson(res, 400, { ok: false, error: e.message });
   }
+}
+
+async function handleProjectIndex(req, res) {
+  try {
+    if (!getProjectRoot()) {
+      sendJson(res, 400, { ok: false, error: 'No project connected. POST /project first.' });
+      return;
+    }
+    // Respond immediately; the client polls GET /project for progress.
+    indexProject().catch(() => {});
+    sendJson(res, 200, { ok: true, ...getProjectIndex() });
+  } catch (e) {
+    sendJson(res, 500, { ok: false, error: e.message });
+  }
+}
+
+async function handleModelInfo(req, res, url) {
+  const name = url.searchParams.get('name');
+  if (!name) {
+    sendJson(res, 400, { ok: false, error: 'Missing ?name= query parameter.' });
+    return;
+  }
+  let info = null;
+  try {
+    info = await provider.showModel(name);
+  } catch {
+    info = null; // older Ollama without /api/show — fall back to the tags cache
+  }
+  const caps = await getCapabilities();
+  const capSet = caps[name];
+  const capabilities = info && info.capabilities.length ? info.capabilities : capSet ? [...capSet] : [];
+  const capabilitiesKnown = capabilities.length > 0;
+  sendJson(res, 200, {
+    ok: true,
+    name,
+    contextLength: info ? info.contextLength : null,
+    capabilities,
+    tools: capabilities.includes('tools') ? true : capabilitiesKnown ? false : null,
+    thinking: capabilities.includes('thinking') ? true : capabilitiesKnown ? false : null,
+    vision: capabilities.includes('vision') ? true : capabilitiesKnown ? false : null,
+    family: info ? info.family : null,
+    parameterSize: info ? info.parameterSize : null,
+    quantization: info ? info.quantization : null,
+    size: info ? info.size : null,
+  });
 }
 
 async function handleChat(req, res) {
@@ -167,6 +223,7 @@ async function handleChat(req, res) {
 
   const session = ensureSession(body.sessionId);
   if (body.model) session.model = body.model;
+  if (body.searchProvider) setSearchProvider(body.searchProvider);
 
   const userMessage =
     typeof body.message === 'string' && body.message.trim() ? body.message : null;
@@ -191,15 +248,35 @@ async function handleChat(req, res) {
   const think = !!(caps[session.model] && caps[session.model].has('thinking'));
   const vision = !!(caps[session.model] && caps[session.model].has('vision'));
 
+  // Honest tool support: gate on what Ollama reports for this model, never on
+  // the model's name. `null` means the install is too old to report
+  // capabilities at all — then we send the tools and let Ollama decide.
+  const modelCaps = caps[session.model];
+  const capabilitiesKnown = Object.values(caps).some((s) => s && s.size > 0);
+  const toolsSupported = capabilitiesKnown ? !!(modelCaps && modelCaps.has('tools')) : null;
+
+  // "Find best link" is optional: some models get lost in ranked lists, so
+  // the client can turn it off and keep the plain web_search tool only.
+  let tools = TOOL_DEFINITIONS;
+  if (body.findBestLink === false) {
+    tools = tools.filter((t) => t && t.function && t.function.name !== 'find_best_link');
+  }
+  if (toolsSupported === false) tools = [];
+
   const ac = new AbortController();
   activeRuns.set(session.id, ac);
 
   try {
-    emit('start', { sessionId: session.id, model: session.model, project: getProjectRoot() });
+    emit('start', {
+      sessionId: session.id,
+      model: session.model,
+      project: getProjectRoot(),
+      tools: tools.length ? toolsSupported : false,
+    });
     const result = await runAgent({
       model: session.model,
       messages: session.messages,
-      tools: TOOL_DEFINITIONS,
+      tools,
       autoApprove: !!body.autoApprove,
       think,
       vision,
@@ -278,7 +355,15 @@ async function route(req, res, pathname) {
 
   if (req.method === 'GET' && pathname === '/health') {
     const h = await provider.health();
-    sendJson(res, 200, { ok: h.reachable, ollama: provider.endpoint, ...h, project: getProjectRoot() });
+    const project = getProjectIndex();
+    sendJson(res, 200, {
+      ok: h.reachable,
+      ollama: provider.endpoint,
+      ...h,
+      project: getProjectRoot(),
+      projectStatus: project.status,
+      projectFiles: project.fileCount,
+    });
     return;
   }
 
@@ -299,13 +384,23 @@ async function route(req, res, pathname) {
     return;
   }
 
+  if (req.method === 'GET' && pathname === '/model_info') {
+    await handleModelInfo(req, res, new URL(req.url, `http://${req.headers.host || 'localhost'}`));
+    return;
+  }
+
   if (req.method === 'GET' && pathname === '/project') {
-    sendJson(res, 200, { ok: true, root: getProjectRoot() });
+    sendJson(res, 200, { ok: true, ...getProjectIndex() });
     return;
   }
 
   if (req.method === 'POST' && pathname === '/project') {
     await handleProject(req, res);
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/project/index') {
+    await handleProjectIndex(req, res);
     return;
   }
 
@@ -335,9 +430,11 @@ async function route(req, res, pathname) {
       endpoints: [
         'GET  /health',
         'GET  /models',
+        'GET  /model_info?name=<model>',
         'GET  /project',
-        'POST /project   { root }',
-        'POST /chat      { sessionId?, message, model?, autoApprove? }  (Server-Sent Events)',
+        'POST /project       { root }',
+        'POST /project/index',
+        'POST /chat      { sessionId?, message, model?, autoApprove?, messages?, searchProvider?, findBestLink? }  (Server-Sent Events)',
         'POST /approve   { id, allowed, scope? }   scope: once|session|always',
         'POST /browser/result { id, result | error }',
         'POST /stop      { sessionId }',

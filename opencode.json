@@ -1,7 +1,21 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "ollama/qwen3.8:27b",
+  "model": "llama-local/qwen3.8-27b",
   "provider": {
+    "llama-local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llama-server (local)",
+      "options": {
+        "baseURL": "http://127.0.0.1:9931"
+      },
+      "models": {
+        "qwen3.8-27b": {
+          "name": "Qwen3.8 27B IQ3_XXS",
+          "tools": true,
+          "limit": { "context": 32768, "output": 4096 }
+        }
+      }
+    },
     "ollama": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "Ollama",
@@ -13,11 +27,12 @@
           "name": "Qwen 27B",
           "tools": true
         },
-        "qwen3-coder:30b ": {
+        "qwen3-coder:30b": {
           "name": "Qwen 30B Coder",
           "tools": true
         }
       }
     }
-  }
+  },
+  "instructions": ["NOTES.md"]
 }
