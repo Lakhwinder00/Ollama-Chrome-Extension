@@ -21,6 +21,7 @@ const {
   getProjectIndex,
 } = require('./tools');
 const { runAgent } = require('./agent');
+const { routeScope, pickTools, buildScopePrompt } = require('./scope');
 
 const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -248,6 +249,19 @@ async function handleChat(req, res) {
   const think = !!(caps[session.model] && caps[session.model].has('thinking'));
   const vision = !!(caps[session.model] && caps[session.model].has('vision'));
 
+  // Two-scope routing: decide whether this is a current-page task or research
+  const currentPageOnly = body.currentPageOnly !== false; // default ON
+  const pageInfo = body.pageInfo || null;
+  let scope = 'research';
+  if (currentPageOnly && pageInfo) {
+    try {
+      scope = await routeScope(userMessage, pageInfo, true);
+    } catch {
+      scope = 'research';
+    }
+  }
+  emit('scope', { scope, pageInfo: pageInfo ? { title: pageInfo.title, url: pageInfo.url } : null });
+
   // Honest tool support: gate on what Ollama reports for this model, never on
   // the model's name. `null` means the install is too old to report
   // capabilities at all — then we send the tools and let Ollama decide.
@@ -263,6 +277,9 @@ async function handleChat(req, res) {
   }
   if (toolsSupported === false) tools = [];
 
+  // Restrict tools by scope
+  tools = pickTools(tools, scope);
+
   const ac = new AbortController();
   activeRuns.set(session.id, ac);
 
@@ -272,11 +289,14 @@ async function handleChat(req, res) {
       model: session.model,
       project: getProjectRoot(),
       tools: tools.length ? toolsSupported : false,
+      scope,
     });
     const result = await runAgent({
       model: session.model,
       messages: session.messages,
       tools,
+      scope,
+      scopePrompt: buildScopePrompt(scope, pageInfo, body.mode || 'auto', userMessage),
       autoApprove: !!body.autoApprove,
       think,
       vision,

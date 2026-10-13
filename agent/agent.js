@@ -155,6 +155,28 @@ function ensureSystemMessage(messages) {
   return list;
 }
 
+/** Inject a scope-specific system prompt instead of the default one. */
+function ensureScopeMessage(messages, scopePrompt) {
+  const system = { role: 'system', content: scopePrompt };
+  const list = Array.isArray(messages) ? messages.slice() : [];
+  if (list.length && list[0].role === 'system') {
+    list[0] = system;
+  } else {
+    list.unshift(system);
+  }
+  if (list.length > MAX_HISTORY) {
+    const trimmed = list.filter((m) => m.role === 'system');
+    trimmed.push(...list.slice(-(MAX_HISTORY - trimmed.length)));
+    if (!trimmed.some((m) => m.role === 'user')) {
+      const ask = lastUserText(list) || 'Please continue from the results above and answer the original request.';
+      const firstNonSystem = trimmed.findIndex((m) => m.role !== 'system');
+      trimmed.splice(firstNonSystem === -1 ? trimmed.length : firstNonSystem, 0, { role: 'user', content: ask });
+    }
+    return trimmed;
+  }
+  return list;
+}
+
 function summarizeResult(result) {
   if (result == null) return '';
   if (typeof result === 'string') return result.slice(0, 200);
@@ -602,6 +624,8 @@ async function runAgent({
   model,
   messages,
   tools = TOOL_DEFINITIONS,
+  scope = null,
+  scopePrompt = null,
   autoApprove = false,
   think = false,
   planFirst = false,
@@ -613,7 +637,7 @@ async function runAgent({
   provider = new OllamaProvider(),
   preApproved = [],
 }) {
-  const history = ensureSystemMessage(messages);
+  const history = scopePrompt ? ensureScopeMessage(messages, scopePrompt) : ensureSystemMessage(messages);
   const recentCalls = [];
   let browserNudges = 0;
   let stagnantSteps = 0;
@@ -805,7 +829,7 @@ async function runAgent({
           toolMessage.images = [imageToBase64(image)];
         } else {
           toolMessage.content +=
-            '\n(Screenshot captured and shown to the user in the panel. Your model has no vision support — verify with get_page/get_dom text instead.)';
+            '\n(Screenshot captured and shown to the user in the panel. Your model has no vision support — use get_page({ max_chars, max_scrolls }) or get_dom(selector?, max_items?) to read the tab content instead.)';
         }
       }
       history.push(toolMessage);

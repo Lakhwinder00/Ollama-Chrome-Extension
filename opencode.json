@@ -1,38 +1,61 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "llama-local/qwen3.8-27b",
+  "model": "ollama/qwen3-coder:30b",
+  "small_model": "ollama/qwen3-coder:30b",
+  "default_agent": "build",
+  "autoupdate": false,
   "provider": {
-    "llama-local": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "llama-server (local)",
-      "options": {
-        "baseURL": "http://127.0.0.1:9931"
-      },
-      "models": {
-        "qwen3.8-27b": {
-          "name": "Qwen3.8 27B IQ3_XXS",
-          "tools": true,
-          "limit": { "context": 32768, "output": 4096 }
-        }
-      }
-    },
     "ollama": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "Ollama",
       "options": {
-        "baseURL": "http://localhost:11434/v1"
+        "baseURL": "http://localhost:11434/v1",
+        "timeout": false
       },
       "models": {
-        "qwen3.8:27b": {
-          "name": "Qwen 27B",
-          "tools": true
-        },
         "qwen3-coder:30b": {
           "name": "Qwen 30B Coder",
-          "tools": true
+          "tools": true,
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          },
+          "options": {
+            "temperature": 0.2
+          }
+        },
+        "qwen3.8:27b ": {
+          "name": "Qwen 27B",
+          "tools": true,
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          },
+          "options": {
+            "temperature": 0.2
+          }
+        },
+         "glm-4.7-flash:latest ": {
+          "name": "GLM 4.7 Flash",
+          "tools": true,
+          "limit": {
+            "context": 16384,
+            "output": 4096
+          }
         }
       }
     }
   },
-  "instructions": ["NOTES.md"]
+  "permission": {
+    "read": "allow",
+    "edit": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "bash": "allow",
+    "task": "deny",
+    "todowrite": "allow",
+    "webfetch": "deny",
+    "websearch": "deny"
+  }
 }

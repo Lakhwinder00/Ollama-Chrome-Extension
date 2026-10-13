@@ -1842,6 +1842,16 @@ function handleEvent(event, data) {
         saveSettings();
       }
       break;
+    case 'scope': {
+      const chip = $('scopeChip');
+      if (chip) {
+        const scope = payload.scope || 'research';
+        chip.dataset.scope = scope;
+        chip.textContent = scope === 'page' ? 'Current page' : scope === 'both' ? 'Page + Research' : 'Research';
+        chip.hidden = false;
+      }
+      break;
+    }
     case 'status': {
       const message = payload.message || '…';
       if (streaming) setGenState('working');
@@ -1942,6 +1952,22 @@ function looksLikePageEditRequest(text) {
       t
     );
   if (question) return false;
+
+  // Check for current page mentions - more comprehensive patterns
+  const currentPagePatterns = [
+    /\b(current\s+(page|tab|window)|page\s+(is|on)|tab\s+(is|on)|this.*page|that.*page|here)\b/i,
+    /\b(make\s+(current|active)|change\s+(the|this|that).*page|set\s+(current|active)|update\s+(the|this|that).*page)\b/i,
+    /\b(switch.*to\s+current|go\s+to\s+tab\s+.*on|focus\s+on\s+current|scroll.*to\s+current|visit\s+this.*page)\b/i,
+    /\b(show\s+(me|what's).*on\s+(current|this|that).*\b)\b/i,
+    /\b(open|view|load|navigate)\s+(to\s+)?(current|this|that|my).*page\b/i,
+  ];
+
+  for (const pattern of currentPagePatterns) {
+    if (pattern.test(t)) {
+      return true; // First ask clarifying question
+    }
+  }
+
   return /\b(updat\w*|edit\w*|chang\w*|fix\w*|correct\w*|replac\w*|rewrit\w*|fill\w*|add\w*|remov\w*|delet\w*|sav\w*|submit\w*|publish\w*|post\w*|writ\w*|appl\w*|renam\w*|complet\w*|improv\w*)\b/i.test(
     t
   );
@@ -2044,10 +2070,52 @@ function buildTabContext(snap) {
     .join('\n');
 }
 
+/**
+ * Check if text mentions "current page" or refers to it in a way that needs clarification.
+ * This ensures users clarify what specific page or tab they want when asking about it.
+ */
+function askForPageClarification(text) {
+  const t = String(text || '').trim();
+  if (!t) return null;
+
+  // Detect various ways users might refer to the current page
+  // Including: "this page", "current page", "tab I'm on", etc.
+  const currentPagePatterns = [
+    /\b(current\s+(page|tab|window)|page\s+(is|on)|tab\s+(is|on)|this.*page|that.*page|here)\b/i,
+    /\b(make\s+(current|active)|change\s+(the|this|that).*page|set\s+(current|active)|update\s+(the|this|that).*page)\b/i,
+    /\b(switch.*to\s+current|go\s+to\s+tab\s+.*on|focus\s+on\s+current|scroll.*to\s+current|visit\s+this.*page)\b/i,
+    /\b(show\s+(me|what's).*on\s+(current|this|that).*\b)\b/i,
+    /\b(open|view|load|navigate)\s+(to\s+)?(current|this|that|my).*page\b/i,
+  ];
+
+  for (const pattern of currentPagePatterns) {
+    if (pattern.test(t)) {
+      const options = [
+        'I am currently on',
+        'I want to change',
+        'I want to navigate to',
+        'I want to view'
+      ];
+      const example = options[Math.floor(Math.random() * options.length)];
+      return `What would you like to do? ${example} the page you're referring to, including: 1) The specific URL, 2) A different browser tab, 3) The active browser tab currently selected, or 4) A section on this page?`;
+    }
+  }
+
+  return null;
+}
+
 async function sendMessage(overrideText, options) {
   const opts = options || {};
   const isRegen = typeof overrideText === 'string';
   const text = isRegen ? overrideText : inputEl.value.trim();
+  // Check for page clarification request
+  if (!isRegen && !streaming) {
+    const clarification = askForPageClarification(text);
+    if (clarification) {
+      appendStatus('❓ Clarification: ' + clarification);
+      return;
+    }
+  }
   if (!text || streaming) return;
   if (!isRegen) {
     inputEl.value = '';
@@ -2066,6 +2134,7 @@ async function sendMessage(overrideText, options) {
   // (selection / visible / full page) comes from Settings → Context.
   let outMessage = text;
   let capturedFullSnap = null;
+  let pageInfoForScope = null;
   if (settings.includeTab !== false) {
     const mode = currentContextMode();
     appendStatus(mode === 'selection' ? '📄 Reading selection…' : '🌐 Reading page…');
@@ -2076,6 +2145,12 @@ async function sendMessage(overrideText, options) {
         mode,
       });
       if (mode === 'full') capturedFullSnap = snap;
+      // Scope routing needs the page's identity and some text in every mode.
+      pageInfoForScope = {
+        title: (snap && snap.title) || '',
+        url: (snap && snap.url) || '',
+        text: ((snap && snap.text) || '').slice(0, 5000),
+      };
       if (mode === 'selection' && snap && snap.empty) {
         appendStatus('ℹ Nothing selected — sending without page context');
       } else {
@@ -2162,7 +2237,11 @@ async function sendMessage(overrideText, options) {
     autoApprove: settings.autoApprove,
     searchProvider: settings.searchProvider || undefined,
     findBestLink: settings.findBestLink !== false,
+    currentPageOnly: settings.includeTab !== false,
+    mode: settings.researchMode || 'full',
+    pageInfo: pageInfoForScope || undefined,
   };
+
   // Regenerating rewinds the server-side history so the old answer is not
   // part of the context for the replacement answer.
   if (Array.isArray(opts.seedMessages)) body.messages = opts.seedMessages;

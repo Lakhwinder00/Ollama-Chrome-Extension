@@ -1101,6 +1101,28 @@ details.section[open] > summary {
   border-radius: 999px;
   padding: 2px 9px;
 }
+.scope-chip {
+  font-size: 10px;
+  font-family: var(--mono);
+  border-radius: 999px;
+  padding: 2px 9px;
+  border: 1px solid transparent;
+}
+.scope-chip[data-scope="page"] {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border-color: rgba(0, 184, 148, 0.3);
+}
+.scope-chip[data-scope="research"] {
+  color: var(--indigo);
+  background: var(--indigo-soft);
+  border-color: rgba(99, 102, 241, 0.3);
+}
+.scope-chip[data-scope="both"] {
+  color: var(--warning);
+  background: rgba(180, 83, 9, 0.1);
+  border-color: rgba(180, 83, 9, 0.3);
+}
 .composer textarea {
   flex: 1;
   min-height: 38px;
