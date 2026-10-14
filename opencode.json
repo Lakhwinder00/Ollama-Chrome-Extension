@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "ollama/qwen3-coder:30b",
+  "model": "ollama/bonsai-27b",
   "small_model": "ollama/qwen3-coder:30b",
   "default_agent": "build",
   "autoupdate": false,
@@ -13,6 +13,17 @@
         "timeout": false
       },
       "models": {
+        "qwen3.5:9b ": {
+          "name": "qwen3.5:9b",
+          "tools": true,
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          },
+          "options": {
+            "temperature": 0.2
+          }
+        },
         "qwen3-coder:30b": {
           "name": "Qwen 30B Coder",
           "tools": true,
@@ -24,18 +35,7 @@
             "temperature": 0.2
           }
         },
-        "qwen3.8:27b ": {
-          "name": "Qwen 27B",
-          "tools": true,
-          "limit": {
-            "context": 32768,
-            "output": 4096
-          },
-          "options": {
-            "temperature": 0.2
-          }
-        },
-         "glm-4.7-flash:latest ": {
+        "glm-4.7-flash:latest": {
           "name": "GLM 4.7 Flash",
           "tools": true,
           "limit": {

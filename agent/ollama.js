@@ -18,6 +18,7 @@ const NUM_CTX = Number(process.env.OLLAMA_NUM_CTX) || 8192;
  * Shape the message list the way Ollama's renderers require: exactly one
  * leading system message and at least one user turn anywhere in the history
  * (tool-loop continuations alone are rejected with 500).
+ * Preserves images array for vision models.
  */
 function prepareMessages(messages) {
   const list = (Array.isArray(messages) ? messages : []).filter((m) => m && typeof m === 'object');
@@ -27,7 +28,16 @@ function prepareMessages(messages) {
   if (!out.some((m) => m.role === 'user')) {
     out.push({ role: 'user', content: 'Continue from the results above and answer the original request.' });
   }
-  return out;
+  // Preserve images in messages for vision models
+  return out.map(m => {
+    const msg = { role: m.role, content: m.content };
+    if (Array.isArray(m.images) && m.images.length > 0) {
+      msg.images = m.images;
+    }
+    if (m.tool_calls) msg.tool_calls = m.tool_calls;
+    if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
+    return msg;
+  });
 }
 
 async function ollamaFetch(pathname, options = {}) {

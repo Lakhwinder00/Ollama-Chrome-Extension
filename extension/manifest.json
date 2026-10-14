@@ -3,7 +3,7 @@
   "name": "Local Code Agent",
   "version": "1.1.0",
   "description": "A Claude Code-like coding agent powered by a local Ollama model.",
-  "permissions": ["storage", "activeTab", "scripting", "sidePanel"],
+  "permissions": ["storage", "activeTab", "scripting", "sidePanel", "audioCapture"],
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*", "<all_urls>"],
   "side_panel": {
     "default_path": "sidepanel.html"

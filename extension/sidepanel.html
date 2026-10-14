@@ -34,26 +34,46 @@
         <span class="summary-value" id="modelSummary">loading…</span>
       </summary>
       <div class="section-body">
+        <div class="control-group">
+          <span class="label">Provider</span>
+          <select id="providerSelect" title="Model provider">
+            <option value="ollama">Ollama (Local)</option>
+            <option value="opencode">OpenCode (Local)</option>
+            <option value="anthropic">Anthropic (Claude)</option>
+            <option value="openai">OpenAI (ChatGPT)</option>
+            <option value="gemini">Google Gemini</option>
+            <option value="openrouter">OpenRouter (Multi-model)</option>
+          </select>
+        </div>
+        <div class="control-group" id="apiKeyGroup" style="display: none;">
+          <span class="label">API Key</span>
+          <div class="input-row">
+            <input id="apiKeyInput" type="password" placeholder="Enter API key" />
+            <button id="saveApiKey" class="btn secondary" title="Save API key">Save</button>
+            <button id="clearApiKey" class="btn secondary danger" title="Clear API key" style="display: none;">Clear</button>
+          </div>
+          <p class="hint" id="apiKeyHint"></p>
+        </div>
         <div class="model-row">
           <div class="select-wrapper">
-            <select id="modelSelect" title="Ollama model">
+            <select id="modelSelect" title="Model">
               <option>Loading models…</option>
             </select>
           </div>
           <button id="refreshModels" class="btn secondary icon" title="Refresh models" aria-label="Refresh models">⟳</button>
         </div>
         <div class="model-meta" id="modelMeta" aria-live="polite">
-          <span class="meta-chip" id="modelCtx" title="Context window reported by Ollama">ctx —</span>
-          <span class="meta-chip" id="modelTools" data-state="unknown" title="Native tool calling support reported by Ollama">tools —</span>
-          <span class="meta-chip" id="modelThinking" data-state="unknown" title="Thinking-stream support reported by Ollama">thinking —</span>
-          <span class="meta-chip" id="modelHealth" data-state="unknown" title="Ollama server reachability">ollama —</span>
+          <span class="meta-chip" id="modelCtx" title="Context window">ctx —</span>
+          <span class="meta-chip" id="modelTools" data-state="unknown" title="Tool calling support">tools —</span>
+          <span class="meta-chip" id="modelThinking" data-state="unknown" title="Thinking-stream support">thinking —</span>
+          <span class="meta-chip" id="modelHealth" data-state="unknown" title="Provider reachability">provider —</span>
         </div>
         <div class="preset-row" role="group" aria-label="Pick a model for a job">
-          <button type="button" class="btn secondary preset-btn" data-preset="coding" title="Best local model for writing and editing code (tools + size)">⌘ Coding</button>
-          <button type="button" class="btn secondary preset-btn" data-preset="general" title="Balanced everyday assistant (around 8B)">✦ General</button>
+          <button type="button" class="btn secondary preset-btn" data-preset="coding" title="Best model for writing and editing code (tools + size)">⌘ Coding</button>
+          <button type="button" class="btn secondary preset-btn" data-preset="general" title="Balanced everyday assistant">✦ General</button>
           <button type="button" class="btn secondary preset-btn" data-preset="research" title="Tools + big context for web research">⌕ Research</button>
         </div>
-        <p class="hint">Capabilities are read from Ollama itself — never guessed from the model name. Presets pick the best installed local model for the job.</p>
+        <p class="hint">Capabilities are read from the provider. Presets pick the best available model for the job.</p>
       </div>
     </details>
 
@@ -117,11 +137,11 @@
           <div class="auto-row">
             <label class="checkbox">
               <input id="autoSearch" type="checkbox" />
-              Auto-search for research &amp; current info
+              Auto-search for research & current info
             </label>
             <label class="checkbox">
               <input id="findBestLink" type="checkbox" checked />
-              Rank &amp; verify links (find best link)
+              Rank & verify links (find best link)
             </label>
             <label class="checkbox">
               <input id="autoPrompt" type="checkbox" checked />
@@ -139,6 +159,14 @@
           </select>
         </div>
         <div class="control-group">
+          <span class="label">Voice Input</span>
+          <p class="hint">Click the 🎤 button in the chat bar to start/stop dictation. Spoken text appears in the input box — press Send when ready.</p>
+          <div class="input-row" style="margin-top: 8px;">
+            <button id="requestMicPermBtn" class="btn secondary" style="flex: 1;">🎤 Request Microphone Permission</button>
+          </div>
+          <p class="hint" id="micPermStatus" style="margin-top: 4px; font-size: 10px;"></p>
+        </div>
+        <div class="control-group">
           <span class="label">Research</span>
           <select id="researchMode">
             <option value="full">Full page research</option>
@@ -151,7 +179,7 @@
 
     <details class="section collapse" id="settingsPanel">
       <summary>
-        <span class="summary-title">Server &amp; approvals</span>
+        <span class="summary-title">Server & approvals</span>
         <span class="summary-value" id="serverSummary">127.0.0.1:8787</span>
       </summary>
       <div class="section-body">
@@ -162,9 +190,25 @@
           </div>
         </div>
         <div class="control-group">
+          <span class="label">OpenCode URL</span>
+          <div class="input-row">
+            <input id="opencodeUrl" type="text" placeholder="http://127.0.0.1:4096" />
+          </div>
+          <p class="hint">URL of the OpenCode API server (default: http://127.0.0.1:4096)</p>
+        </div>
+        <div class="control-group">
+          <span class="label">OpenCode Password</span>
+          <div class="input-row">
+            <input id="opencodePassword" type="password" placeholder="Enter OpenCode password" />
+            <button id="saveOpencodeAuth" class="btn secondary" title="Save OpenCode password">Save</button>
+            <button id="clearOpencodeAuth" class="btn secondary danger" title="Clear OpenCode password" style="display: none;">Clear</button>
+          </div>
+          <p class="hint">Password shown when running <code>opencode serve</code> (Basic auth, username is "opencode")</p>
+        </div>
+        <div class="control-group">
           <label class="checkbox">
             <input id="autoApprove" type="checkbox" />
-            Auto-approve write &amp; run (unsafe)
+            Auto-approve write & run (unsafe)
           </label>
         </div>
       </div>
@@ -201,6 +245,7 @@
     <div class="composer-row">
       <textarea id="input" rows="1" placeholder="Ask anything…  ⏎ send"></textarea>
       <div class="composer-actions">
+        <button id="micBtn" class="btn secondary icon" title="Voice input (click to speak)" aria-label="Voice input">🎤</button>
         <button id="send" class="send-btn">➤</button>
       </div>
     </div>

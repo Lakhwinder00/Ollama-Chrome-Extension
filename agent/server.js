@@ -10,7 +10,16 @@
 
 const http = require('http');
 const { URL } = require('url');
-const { OllamaProvider } = require('./provider');
+const {
+  OllamaProvider,
+  AnthropicProvider,
+  OpenAIProvider,
+  GeminiProvider,
+  OpenRouterProvider,
+  createProvider,
+  getProviderInfo,
+  getProviderNames,
+} = require('./provider');
 const { loadAlwaysAllowed, allowAlways } = require('./permissions');
 const {
   setProjectRoot,
@@ -26,20 +35,34 @@ const { routeScope, pickTools, buildScopePrompt } = require('./scope');
 const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || '127.0.0.1';
 
-const provider = new OllamaProvider();
-const DEFAULT_MODEL = provider.defaultModel;
+// Provider management
+const providers = new Map();
+function getProvider(name) {
+  if (!providers.has(name)) {
+    let options = {};
+    if (name === 'opencode') {
+      options = { opencodeUrl, opencodeAuth };
+    }
+    providers.set(name, createProvider(name, options));
+  }
+  return providers.get(name);
+}
 
-let capabilitiesCache = null;
+// Default provider (backward compatibility)
+const defaultProvider = new OllamaProvider();
+const DEFAULT_MODEL = defaultProvider.defaultModel;
 
-async function getCapabilities() {
-  if (!capabilitiesCache) {
+let capabilitiesCache = new Map();
+
+async function getCapabilities(provider) {
+  if (!capabilitiesCache.has(provider.name)) {
     try {
-      capabilitiesCache = await provider.modelCapabilities();
+      capabilitiesCache.set(provider.name, await provider.modelCapabilities());
     } catch {
-      capabilitiesCache = {};
+      capabilitiesCache.set(provider.name, {});
     }
   }
-  return capabilitiesCache;
+  return capabilitiesCache.get(provider.name);
 }
 
 // ---------------------------------------------------------------------------
@@ -59,6 +82,26 @@ function ensureSession(sessionId) {
 
 // Active chat runs (sessionId -> AbortController) so /stop can cancel them.
 const activeRuns = new Map();
+
+// Provider API key storage (in-memory, persisted via /providers endpoints)
+const providerApiKeys = new Map();
+
+// OpenCode configuration
+let opencodeUrl = process.env.OPENCODE_URL || 'http://127.0.0.1:4096';
+let opencodeAuth = null; // { type: 'basic', password } or { type: 'bearer', token }
+
+// Session provider mapping
+const sessionProviders = new Map();
+
+function getSessionProvider(session) {
+  const providerName = sessionProviders.get(session.id) || 'ollama';
+  const provider = getProvider(providerName);
+  const apiKey = providerApiKeys.get(providerName);
+  if (apiKey && provider.setApiKey) {
+    provider.setApiKey(apiKey);
+  }
+  return provider;
+}
 
 // ---------------------------------------------------------------------------
 // Approvals: the agent pauses and asks the user before write_file / run_command.
@@ -173,23 +216,29 @@ async function handleProjectIndex(req, res) {
 
 async function handleModelInfo(req, res, url) {
   const name = url.searchParams.get('name');
+  const providerName = url.searchParams.get('provider') || 'ollama';
   if (!name) {
     sendJson(res, 400, { ok: false, error: 'Missing ?name= query parameter.' });
     return;
   }
+  const provider = getProvider(providerName);
+  const apiKey = providerApiKeys.get(providerName);
+  if (apiKey && provider.setApiKey) provider.setApiKey(apiKey);
+  
   let info = null;
   try {
     info = await provider.showModel(name);
   } catch {
-    info = null; // older Ollama without /api/show — fall back to the tags cache
+    info = null;
   }
-  const caps = await getCapabilities();
+  const caps = await getCapabilities(provider);
   const capSet = caps[name];
   const capabilities = info && info.capabilities.length ? info.capabilities : capSet ? [...capSet] : [];
   const capabilitiesKnown = capabilities.length > 0;
   sendJson(res, 200, {
     ok: true,
     name,
+    provider: providerName,
     contextLength: info ? info.contextLength : null,
     capabilities,
     tools: capabilities.includes('tools') ? true : capabilitiesKnown ? false : null,
@@ -224,7 +273,10 @@ async function handleChat(req, res) {
 
   const session = ensureSession(body.sessionId);
   if (body.model) session.model = body.model;
+  if (body.provider) sessionProviders.set(session.id, body.provider);
   if (body.searchProvider) setSearchProvider(body.searchProvider);
+
+  const provider = getSessionProvider(session);
 
   const userMessage =
     typeof body.message === 'string' && body.message.trim() ? body.message : null;
@@ -245,7 +297,7 @@ async function handleChat(req, res) {
 
   session.messages.push({ role: 'user', content: userMessage });
 
-  const caps = await getCapabilities();
+  const caps = await getCapabilities(provider);
   const think = !!(caps[session.model] && caps[session.model].has('thinking'));
   const vision = !!(caps[session.model] && caps[session.model].has('vision'));
 
@@ -262,9 +314,9 @@ async function handleChat(req, res) {
   }
   emit('scope', { scope, pageInfo: pageInfo ? { title: pageInfo.title, url: pageInfo.url } : null });
 
-  // Honest tool support: gate on what Ollama reports for this model, never on
+  // Honest tool support: gate on what the provider reports for this model, never on
   // the model's name. `null` means the install is too old to report
-  // capabilities at all — then we send the tools and let Ollama decide.
+  // capabilities at all — then we send the tools and let the provider decide.
   const modelCaps = caps[session.model];
   const capabilitiesKnown = Object.values(caps).some((s) => s && s.size > 0);
   const toolsSupported = capabilitiesKnown ? !!(modelCaps && modelCaps.has('tools')) : null;
@@ -287,6 +339,7 @@ async function handleChat(req, res) {
     emit('start', {
       sessionId: session.id,
       model: session.model,
+      provider: provider.name,
       project: getProjectRoot(),
       tools: tools.length ? toolsSupported : false,
       scope,
@@ -374,11 +427,17 @@ async function route(req, res, pathname) {
   }
 
   if (req.method === 'GET' && pathname === '/health') {
-    const h = await provider.health();
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const providerName = url.searchParams.get('provider') || 'ollama';
+    const p = getProvider(providerName);
+    const apiKey = providerApiKeys.get(providerName);
+    if (apiKey && p.setApiKey) p.setApiKey(apiKey);
+    const h = await p.health();
     const project = getProjectIndex();
     sendJson(res, 200, {
       ok: h.reachable,
-      ollama: provider.endpoint,
+      provider: providerName,
+      endpoint: p.endpoint,
       ...h,
       project: getProjectRoot(),
       projectStatus: project.status,
@@ -388,16 +447,21 @@ async function route(req, res, pathname) {
   }
 
   if (req.method === 'GET' && pathname === '/models') {
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const providerName = url.searchParams.get('provider') || 'ollama';
+    const p = getProvider(providerName);
+    const apiKey = providerApiKeys.get(providerName);
+    if (apiKey && p.setApiKey) p.setApiKey(apiKey);
     try {
       let details = [];
       try {
-        details = await provider.listModelDetails();
+        details = await p.listModelDetails();
       } catch {
         details = []; // older providers may not expose details
       }
-      const models = details.length ? details.map((d) => d.name) : await provider.listModels();
-      capabilitiesCache = null; // re-read capabilities on next chat
-      sendJson(res, 200, { ok: true, models, details });
+      const models = details.length ? details.map((d) => d.name) : await p.listModels();
+      capabilitiesCache.delete(p.name); // re-read capabilities on next chat
+      sendJson(res, 200, { ok: true, provider: providerName, models, details });
     } catch (e) {
       sendJson(res, 502, { ok: false, error: e.message });
     }
@@ -411,6 +475,141 @@ async function route(req, res, pathname) {
 
   if (req.method === 'GET' && pathname === '/project') {
     sendJson(res, 200, { ok: true, ...getProjectIndex() });
+    return;
+  }
+
+  // Provider endpoints
+  if (req.method === 'GET' && pathname === '/providers') {
+    const info = getProviderInfo().map(p => ({
+      ...p,
+      hasApiKey: !!providerApiKeys.get(p.id),
+    }));
+    sendJson(res, 200, { ok: true, providers: info });
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/providers/api-key') {
+    const body = await readJson(req);
+    const { provider, apiKey } = body;
+    if (!provider || !apiKey) {
+      sendJson(res, 400, { ok: false, error: 'Missing provider or apiKey.' });
+      return;
+    }
+    const p = getProvider(provider);
+    if (p.setApiKey) {
+      p.setApiKey(apiKey);
+      providerApiKeys.set(provider, apiKey);
+      // Test the key
+      const health = await p.health();
+      sendJson(res, 200, { ok: true, ...health });
+    } else {
+      sendJson(res, 400, { ok: false, error: 'Provider does not support API keys.' });
+    }
+    return;
+  }
+
+  if (req.method === 'DELETE' && pathname === '/providers/api-key') {
+    const body = await readJson(req);
+    const { provider } = body;
+    if (!provider) {
+      sendJson(res, 400, { ok: false, error: 'Missing provider.' });
+      return;
+    }
+    const p = getProvider(provider);
+    if (p.setApiKey) {
+      p.setApiKey(null);
+      providerApiKeys.delete(provider);
+      sendJson(res, 200, { ok: true });
+    } else {
+      sendJson(res, 400, { ok: false, error: 'Provider does not support API keys.' });
+    }
+    return;
+  }
+
+  // OpenCode URL endpoint
+  if (req.method === 'POST' && pathname === '/providers/opencode-url') {
+    const body = await readJson(req);
+    const { url } = body;
+    if (!url) {
+      sendJson(res, 400, { ok: false, error: 'Missing url.' });
+      return;
+    }
+    opencodeUrl = url;
+    // Update the provider if it exists
+    if (providers.has('opencode')) {
+      const p = providers.get('opencode');
+      if (p && p.endpoint) {
+        // Re-create the provider with new URL
+        providers.delete('opencode');
+      }
+    }
+    sendJson(res, 200, { ok: true, url: opencodeUrl });
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/providers/opencode-url') {
+    sendJson(res, 200, { ok: true, url: opencodeUrl });
+    return;
+  }
+
+  // OpenCode auth endpoint
+  if (req.method === 'POST' && pathname === '/providers/opencode-auth') {
+    const body = await readJson(req);
+    const { auth } = body;
+    // Allow null to clear auth
+    if (auth === null || auth === undefined) {
+      opencodeAuth = null;
+      if (providers.has('opencode')) {
+        providers.delete('opencode');
+      }
+      sendJson(res, 200, { ok: true, auth: null });
+      return;
+    }
+    if (!auth.type || (auth.type !== 'basic' && auth.type !== 'bearer')) {
+      sendJson(res, 400, { ok: false, error: 'Missing or invalid auth. Expected { type: "basic", password } or { type: "bearer", token }' });
+      return;
+    }
+    if (auth.type === 'basic' && !auth.password) {
+      sendJson(res, 400, { ok: false, error: 'Missing password for basic auth' });
+      return;
+    }
+    if (auth.type === 'bearer' && !auth.token) {
+      sendJson(res, 400, { ok: false, error: 'Missing token for bearer auth' });
+      return;
+    }
+    opencodeAuth = auth;
+    // Re-create the provider with new auth
+    if (providers.has('opencode')) {
+      providers.delete('opencode');
+    }
+    sendJson(res, 200, { ok: true, auth: { type: auth.type } });
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/providers/opencode-auth') {
+    sendJson(res, 200, { ok: true, auth: opencodeAuth ? { type: opencodeAuth.type } : null });
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/providers/models') {
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const providerName = url.searchParams.get('provider') || 'ollama';
+    const provider = getProvider(providerName);
+    const apiKey = providerApiKeys.get(providerName);
+    if (apiKey && provider.setApiKey) provider.setApiKey(apiKey);
+    try {
+      let details = [];
+      try {
+        details = await provider.listModelDetails();
+      } catch {
+        details = [];
+      }
+      const models = details.length ? details.map((d) => d.name) : await provider.listModels();
+      capabilitiesCache.delete(provider.name); // re-read capabilities on next chat
+      sendJson(res, 200, { ok: true, provider: providerName, models, details });
+    } catch (e) {
+      sendJson(res, 502, { ok: false, error: e.message });
+    }
     return;
   }
 
@@ -484,9 +683,10 @@ server.listen(PORT, HOST, () => {
   console.log('  Local Code Agent Server');
   console.log('  ─────────────────────────────────────────────');
   console.log(`  Listening on  http://${HOST}:${PORT}`);
-  console.log(`  Provider      ${provider.name}`);
-  console.log(`  Endpoint      ${provider.endpoint}`);
-  console.log(`  Default model ${DEFAULT_MODEL}`);
-  console.log(`  Project root  ${getProjectRoot() || '(not set — use POST /project)'}`);
+  console.log(`  Default provider: Ollama`);
+  console.log(`  Endpoint        ${defaultProvider.endpoint}`);
+  console.log(`  Default model   ${DEFAULT_MODEL}`);
+  console.log(`  Available providers: ${getProviderNames().join(', ')}`);
+  console.log(`  Project root    ${getProjectRoot() || '(not set — use POST /project)'}`);
   console.log('');
 });

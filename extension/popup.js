@@ -12,6 +12,7 @@ const $ = (id) => document.getElementById(id);
 const messagesEl = $('messages');
 const inputEl = $('input');
 const sendBtn = $('send');
+const micBtn = $('micBtn');
 const stopBtn = $('stopBtn');
 const regenBtn = $('regenBtn');
 const copyBtn = $('copyBtn');
@@ -32,6 +33,7 @@ const GEN_LABELS = {
 let settings = {
   serverUrl: DEFAULT_SERVER,
   model: '',
+  provider: 'ollama',
   autoApprove: false,
   includeTab: true,
   projectRoot: '',
@@ -42,8 +44,11 @@ let settings = {
   researchMode: 'full',
   searchProvider: 'google',
   contextMode: 'full',
+  opencodeUrl: 'http://127.0.0.1:4096',
+  opencodeAuth: null,
 };
 let models = [];
+let providers = [];
 let transcript = [];
 let lastBlock = null;
 let persistTimer = null;
@@ -71,6 +76,11 @@ async function loadSettings() {
   $('researchMode').value = settings.researchMode || 'full';
   if ($('searchProvider')) $('searchProvider').value = settings.searchProvider || 'google';
   if ($('contextMode')) $('contextMode').value = settings.contextMode || 'full';
+  if ($('opencodeUrl')) $('opencodeUrl').value = settings.opencodeUrl || 'http://127.0.0.1:4096';
+  if ($('opencodePassword')) {
+    $('opencodePassword').value = settings.opencodeAuth?.password || '';
+    $('clearOpencodeAuth').style.display = settings.opencodeAuth ? 'inline-flex' : 'none';
+  }
   if (settings.projectRoot) $('projectSummary').textContent = settings.projectRoot;
   if (transcript.length) renderTranscript();
   updateStatusModel();
@@ -78,6 +88,16 @@ async function loadSettings() {
   updateServerSummary();
   updateActionButtons();
   updateContextIndicator();
+  
+  // Initialize provider selector
+  const providerSelect = $('providerSelect');
+  if (providerSelect) {
+    providerSelect.value = settings.provider || 'ollama';
+  }
+  await loadProviders().catch(e => {
+    console.error('loadProviders failed, using fallback providers:', e);
+    // Continue anyway - loadModels will use fallback providers
+  });
 }
 
 function saveSettings() {
@@ -90,6 +110,142 @@ function schedulePersist() {
     () => chrome.storage.local.set({ transcript: transcript.slice(-100) }),
     300
   );
+}
+
+// ---------------- provider management ----------------
+async function loadProviders() {
+  console.log('[loadProviders] Fetching providers from:', settings.serverUrl || DEFAULT_SERVER);
+  try {
+    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/providers`);
+    console.log('[loadProviders] Response status:', res.status);
+    const data = await res.json();
+    console.log('[loadProviders] Response data:', data);
+    if (data.ok && Array.isArray(data.providers)) {
+      providers = data.providers;
+      const providerSelect = $('providerSelect');
+      if (providerSelect) {
+        // Update options with provider info from server
+        providerSelect.innerHTML = '';
+        for (const p of providers) {
+          const opt = document.createElement('option');
+          opt.value = p.id;
+          opt.textContent = p.name + (p.requiresApiKey ? ' (API key required)' : '');
+          if (p.hasApiKey) opt.textContent += ' ✓';
+          providerSelect.appendChild(opt);
+        }
+        providerSelect.value = settings.provider || 'ollama';
+      }
+      updateApiKeyUI();
+      await loadModels();
+    }
+  } catch (e) {
+    console.error('Failed to load providers:', e);
+    // Fallback to default providers
+    providers = [
+      { id: 'ollama', name: 'Ollama (Local)', requiresApiKey: false, defaultModel: 'qwen2.5-coder:14b', hasApiKey: false },
+      { id: 'opencode', name: 'OpenCode (Local)', requiresApiKey: false, defaultModel: 'opencode/coder', hasApiKey: false },
+      { id: 'anthropic', name: 'Anthropic (Claude)', requiresApiKey: true, defaultModel: 'claude-3-5-sonnet-20241022', hasApiKey: false },
+      { id: 'openai', name: 'OpenAI (ChatGPT)', requiresApiKey: true, defaultModel: 'gpt-4o-2024-08-06', hasApiKey: false },
+      { id: 'gemini', name: 'Google Gemini', requiresApiKey: true, defaultModel: 'gemini-1.5-pro', hasApiKey: false },
+      { id: 'openrouter', name: 'OpenRouter (Multi-model)', requiresApiKey: true, defaultModel: 'anthropic/claude-3.5-sonnet', hasApiKey: false },
+    ];
+    const providerSelect = $('providerSelect');
+    if (providerSelect) {
+      providerSelect.innerHTML = '';
+      for (const p of providers) {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name + (p.requiresApiKey ? ' (API key required)' : '');
+        providerSelect.appendChild(opt);
+      }
+      providerSelect.value = settings.provider || 'ollama';
+    }
+    updateApiKeyUI();
+    await loadModels();
+  }
+}
+
+function updateApiKeyUI() {
+  const provider = providers.find(p => p.id === settings.provider);
+  const apiKeyGroup = $('apiKeyGroup');
+  const apiKeyInput = $('apiKeyInput');
+  const saveApiKey = $('saveApiKey');
+  const clearApiKey = $('clearApiKey');
+  const apiKeyHint = $('apiKeyHint');
+  
+  if (!provider) return;
+  
+  if (provider.requiresApiKey) {
+    apiKeyGroup.style.display = 'block';
+    apiKeyInput.placeholder = `Enter ${provider.name} API key`;
+    apiKeyHint.textContent = `Get your API key from the ${provider.name} dashboard.`;
+    saveApiKey.style.display = 'inline-flex';
+    clearApiKey.style.display = provider.hasApiKey ? 'inline-flex' : 'none';
+  } else {
+    apiKeyGroup.style.display = 'none';
+  }
+}
+
+async function saveApiKey() {
+  const provider = settings.provider;
+  const apiKey = $('apiKeyInput').value.trim();
+  if (!apiKey) {
+    appendStatus('✖ Please enter an API key');
+    return;
+  }
+  
+  try {
+    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/providers/api-key`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, apiKey }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      appendStatus(`✓ ${provider} API key saved and validated`);
+      const p = providers.find(p => p.id === provider);
+      if (p) p.hasApiKey = true;
+      updateApiKeyUI();
+      await loadModels();
+    } else {
+      appendStatus('✖ ' + (data.error || 'Failed to save API key'));
+    }
+  } catch (e) {
+    appendStatus('✖ Could not reach server to save API key');
+  }
+}
+
+async function clearApiKey() {
+  const provider = settings.provider;
+  try {
+    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/providers/api-key`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      appendStatus(`✓ ${provider} API key cleared`);
+      const p = providers.find(p => p.id === provider);
+      if (p) p.hasApiKey = false;
+      updateApiKeyUI();
+      await loadModels();
+    } else {
+      appendStatus('✖ ' + (data.error || 'Failed to clear API key'));
+    }
+  } catch (e) {
+    appendStatus('✖ Could not reach server to clear API key');
+  }
+}
+
+async function onProviderChange() {
+  const providerSelect = $('providerSelect');
+  if (!providerSelect) return;
+  
+  settings.provider = providerSelect.value;
+  saveSettings();
+  updateApiKeyUI();
+  await loadModels();
 }
 
 // ---------------- status strip ----------------
@@ -132,6 +288,287 @@ function updateServerSummary() {
   const el = $('serverSummary');
   if (!el) return;
   el.textContent = (settings.serverUrl || DEFAULT_SERVER).replace(/^https?:\/\//, '');
+}
+
+// ---------------- Voice Input (Web Speech API) ----------------
+let recognition = null;
+let isListening = false;
+let lastAdded = '';
+
+function initVoiceRecognition() {
+  // Check browser support
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    console.warn('Web Speech API not supported in this browser');
+    if (micBtn) {
+      micBtn.style.display = 'none';
+      micBtn.title = 'Voice input not supported in this browser';
+    }
+    return false;
+  }
+
+  recognition = new SpeechRecognition();
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  recognition.lang = navigator.language || 'en-US';
+  recognition.maxAlternatives = 1;
+
+  recognition.onstart = () => {
+    isListening = true;
+    if (micBtn) {
+      micBtn.classList.add('listening');
+      micBtn.textContent = '⏹';
+      micBtn.title = 'Listening… click to stop';
+    }
+    appendStatus('🎤 Listening…');
+    inputEl.placeholder = 'Listening…';
+  };
+
+  let lastAdded = '';
+  
+  recognition.onresult = (event) => {
+    let finalTranscript = '';
+    let interimTranscript = '';
+
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const transcript = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        finalTranscript += transcript;
+      } else {
+        interimTranscript += transcript;
+      }
+    }
+
+    // Show interim results in the input field
+    const currentText = inputEl.value;
+    
+    if (finalTranscript) {
+      // Prevent duplicate additions - check if transcript was already added recently
+      if (lastAdded && currentText.endsWith(lastAdded)) {
+        // Don't append duplicate text
+        inputEl.value = currentText;
+      } else {
+        lastAdded = finalTranscript;
+        inputEl.value = (currentText + ' ' + finalTranscript).trim();
+      }
+      autoGrow();
+    } else if (interimTranscript) {
+      // Show interim as placeholder or temp text
+      inputEl.value = (currentText + ' ' + interimTranscript).trim();
+      autoGrow();
+    }
+  };
+
+  recognition.onerror = (event) => {
+    console.error('Speech recognition error:', event.error);
+    let errorMsg = 'Voice input error';
+    
+    switch (event.error) {
+      case 'no-speech':
+        errorMsg = 'No speech detected';
+        break;
+      case 'audio-capture':
+        errorMsg = 'Microphone not accessible';
+        break;
+      case 'not-allowed':
+        errorMsg = 'Microphone permission denied';
+        break;
+      case 'network':
+        errorMsg = 'Network error during recognition';
+        break;
+      default:
+        errorMsg = `Voice error: ${event.error}`;
+    }
+    
+    appendStatus('✖ ' + errorMsg);
+    stopListening();
+  };
+
+  recognition.onend = () => {
+    stopListening();
+    // Do NOT auto-send. Text stays in input field for user to review/edit/send manually.
+  };
+
+  return true;
+}
+
+function startListening() {
+  if (!recognition) {
+    if (!initVoiceRecognition()) return;
+  }
+  
+  if (isListening) {
+    stopListening();
+    return;
+  }
+
+  // First, try to get microphone access directly via getUserMedia
+  // This triggers the browser's native permission prompt which works in side panels
+  navigator.mediaDevices.getUserMedia({ audio: true })
+    .then((stream) => {
+      // Permission granted! Stop the stream - we just needed the permission
+      stream.getTracks().forEach(track => track.stop());
+      
+      // Also verify chrome.permissions if available
+      if (chrome.permissions) {
+        chrome.permissions.contains({ permissions: ['audioCapture'] }, (hasPermission) => {
+          if (!hasPermission) {
+            // Request the chrome.permissions too for future sessions
+            chrome.permissions.request({ permissions: ['audioCapture'] }, () => {});
+          }
+          startRecognition();
+        });
+      } else {
+        startRecognition();
+      }
+    })
+    .catch((err) => {
+      console.error('Microphone access error:', err);
+      let msg = 'Microphone access denied';
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        msg = 'Microphone permission denied. Click the 🎤 button again to retry, or: Extension icon → Site settings → Microphone → Allow, then reload side panel.';
+      } else if (err.name === 'NotFoundError') {
+        msg = 'No microphone found. Connect a microphone and try again.';
+      } else if (err.name === 'NotReadableError') {
+        msg = 'Microphone is in use by another application.';
+      }
+      appendStatus('✖ ' + msg);
+      stopListening();
+    });
+
+  function startRecognition() {
+    try {
+      recognition.start();
+    } catch (e) {
+      console.error('Failed to start recognition:', e);
+      appendStatus('✖ Could not start voice recognition: ' + e.message);
+      stopListening();
+    }
+  }
+}
+
+function stopListening() {
+  isListening = false;
+  if (recognition) {
+    try {
+      recognition.stop();
+    } catch (e) {
+      // Ignore errors on stop
+    }
+  }
+  if (micBtn) {
+    micBtn.classList.remove('listening');
+    micBtn.textContent = '🎤';
+    micBtn.title = 'Voice input (click to speak)';
+  }
+  inputEl.placeholder = 'Ask anything…  ⏎ send';
+}
+
+// Check microphone permission status and update UI
+async function checkMicPermission() {
+  if (!micBtn) return;
+  
+  try {
+    if (chrome.permissions) {
+      const hasPermission = await new Promise(resolve => {
+        chrome.permissions.contains({ permissions: ['audioCapture'] }, resolve);
+      });
+      
+      if (!hasPermission) {
+        micBtn.title = 'Voice input (click to request microphone permission)';
+        micBtn.style.opacity = '0.7';
+      } else {
+        micBtn.title = 'Voice input (click to speak)';
+        micBtn.style.opacity = '1';
+      }
+    }
+  } catch (e) {
+    console.warn('Could not check mic permission:', e);
+  }
+}
+
+// Manual microphone permission request (from settings button)
+async function requestMicPermissionManual() {
+  const btn = $('requestMicPermBtn');
+  const statusEl = $('micPermStatus');
+  
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Requesting…';
+  }
+  if (statusEl) statusEl.textContent = '';
+  
+  try {
+    // Try getUserMedia first - triggers browser permission prompt
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach(track => track.stop());
+    
+    // Also request chrome.permissions for persistence
+    if (chrome.permissions) {
+      await new Promise(resolve => {
+        chrome.permissions.request({ permissions: ['audioCapture'] }, resolve);
+      });
+    }
+    
+    if (btn) {
+      btn.textContent = '✓ Permission Granted';
+      btn.style.background = 'var(--success)';
+      btn.style.color = 'white';
+      btn.style.borderColor = 'var(--success)';
+    }
+    if (statusEl) {
+      statusEl.textContent = 'Microphone permission granted! You can now use voice input.';
+      statusEl.style.color = 'var(--success)';
+    }
+    
+    // Update mic button UI
+    if (micBtn) {
+      micBtn.style.opacity = '1';
+      micBtn.title = 'Voice input (click to speak)';
+    }
+    
+    // Reset button after 3 seconds
+    setTimeout(() => {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '🎤 Request Microphone Permission';
+        btn.style.background = '';
+        btn.style.color = '';
+        btn.style.borderColor = '';
+      }
+    }, 3000);
+    
+  } catch (err) {
+    console.error('Manual mic permission error:', err);
+    let msg = 'Permission denied';
+    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+      msg = 'Permission denied. Please click Allow in the browser prompt, or: Extension icon → Site settings → Microphone → Allow.';
+    } else if (err.name === 'NotFoundError') {
+      msg = 'No microphone found.';
+    } else if (err.name === 'NotReadableError') {
+      msg = 'Microphone is in use by another app.';
+    }
+    
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '🎤 Request Microphone Permission';
+    }
+    if (statusEl) {
+      statusEl.textContent = '✖ ' + msg;
+      statusEl.style.color = 'var(--danger)';
+    }
+  }
+}
+
+// Auto-initialize voice recognition when settings load
+function checkVoiceSupport() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition && micBtn) {
+    micBtn.style.display = 'none';
+    return;
+  }
+  // Check mic permission on startup
+  checkMicPermission();
 }
 
 /** Expand (or collapse) one settings section and scroll it into view. */
@@ -2234,6 +2671,7 @@ async function sendMessage(overrideText, options) {
     sessionId: settings.sessionId,
     message: outMessage,
     model: settings.model || undefined,
+    provider: settings.provider || undefined,
     autoApprove: settings.autoApprove,
     searchProvider: settings.searchProvider || undefined,
     findBestLink: settings.findBestLink !== false,
@@ -2288,22 +2726,24 @@ async function stopRun() {
 async function checkHealth() {
   const healthEl = $('modelHealth');
   try {
-    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/health`);
+    const providerParam = settings.provider ? `?provider=${encodeURIComponent(settings.provider)}` : '';
+    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/health${providerParam}`);
     const data = await res.json();
     const connEl = $('conn');
+    const provider = providers.find(p => p.id === settings.provider);
+    const providerName = provider?.name || settings.provider;
     if (data.ok) {
       connEl.textContent = 'connected';
       connEl.className = 'conn ok';
       if (healthEl) {
-        healthEl.textContent = 'ollama online';
+        healthEl.textContent = `${providerName} online`;
         healthEl.dataset.state = 'yes';
       }
-      loadModels(); // Load models when server is up
     } else {
-      connEl.textContent = 'ollama unreachable';
+      connEl.textContent = `${providerName} unreachable`;
       connEl.className = 'conn err';
       if (healthEl) {
-        healthEl.textContent = 'ollama unreachable';
+        healthEl.textContent = `${providerName} unreachable`;
         healthEl.dataset.state = 'no';
       }
     }
@@ -2396,53 +2836,70 @@ function fillModelSelect(sel, list, details) {
 }
 
 async function loadModels() {
+  console.log('[loadModels] Fetching models for provider:', settings.provider);
   try {
-    // Try to fetch models from local Ollama server
-    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/models`);
+    // Fetch models from the selected provider
+    const url = `${settings.serverUrl || DEFAULT_SERVER}/providers/models?provider=${encodeURIComponent(settings.provider)}`;
+    console.log('[loadModels] Request URL:', url);
+    const res = await fetch(url);
+    console.log('[loadModels] Response status:', res.status);
     const data = await res.json();
+    console.log('[loadModels] Response data:', data);
     if (data.ok && Array.isArray(data.models) && data.models.length > 0) {
       models = data.models;
       modelDetailsCache = Array.isArray(data.details) ? data.details : [];
       const sel = $('modelSelect');
-      fillModelSelect(sel, models, data.details);
-      const local = models.filter((m) => !isCloudModel(m));
+      if (sel) {
+        fillModelSelect(sel, models, data.details);
+        
+        // Get provider info for default model
+        const provider = providers.find(p => p.id === settings.provider);
+        const defaultModel = provider?.defaultModel || models[0];
 
-      // Set model to default if it's not already set or is a cloud model
-      const needsReset =
-        !settings.model ||
-        (isCloudModel(settings.model) && local.length) ||
-        !models.includes(settings.model);
+        // Set model to default if it's not already set or not in the list
+        const needsReset =
+          !settings.model ||
+          !models.includes(settings.model);
 
-      if (needsReset && models.length) {
-        settings.model = defaultModelChoice(models);
-        saveSettings();
-        sel.value = settings.model || '';
-        // Notify user of model selection
-        appendStatus(`Selected local model: ${settings.model}`);
-      } else {
-        sel.value = settings.model || '';
+        if (needsReset && models.length) {
+          settings.model = defaultModel;
+          saveSettings();
+          sel.value = settings.model || '';
+          appendStatus(`Selected model: ${settings.model}`);
+        } else {
+          sel.value = settings.model || '';
+        }
+        const providerName = provider?.name || settings.provider;
+        sel.title = `${models.length} ${providerName} models — current: ${settings.model || 'none'}`;
       }
-      sel.title = `${models.length} Ollama models installed — current: ${settings.model || 'none'}`;
       updateStatusModel();
       updateActionButtons();
       updatePresetHighlight();
-      loadModelInfo(settings.model);
+      loadModelInfo(settings.model || '');
     } else {
-      // If no models are found, show error message in UI
+      // If no models are found
       const connEl = $('conn');
-      connEl.textContent = 'online · no models';
-      connEl.className = 'conn err';
+      if (connEl) {
+        connEl.textContent = 'online · no models';
+        connEl.className = 'conn err';
+      }
       
-      // Try to prompt user to check Ollama
-      appendStatus('ℹ Check if Ollama is running and has local models');
+      const provider = providers.find(p => p.id === settings.provider);
+      if (provider?.requiresApiKey && !provider.hasApiKey) {
+        appendStatus(`ℹ Enter your ${provider.name} API key to load models`);
+      } else {
+        appendStatus(`ℹ No models available from ${provider?.name || settings.provider}. Error: ${data.error || 'Unknown'}`);
+      }
     }
   } catch (e) {
+    console.error('[loadModels] Error:', e);
     const connEl = $('conn');
-    connEl.textContent = 'server offline';
-    connEl.className = 'conn err';
-    // Provide troubleshooting message
-    appendStatus('✖ Could not connect to Ollama server. Make sure Ollama is running at ' + 
-      (settings.serverUrl || DEFAULT_SERVER));
+    if (connEl) {
+      connEl.textContent = 'server offline';
+      connEl.className = 'conn err';
+    }
+    appendStatus('✖ Could not connect to server. Make sure the agent server is running at ' + 
+      (settings.serverUrl || DEFAULT_SERVER) + '. Error: ' + (e.message || 'Unknown error'));
   }
 }
 
@@ -2459,6 +2916,7 @@ async function loadModelInfo(name) {
   const ctxEl = $('modelCtx');
   const toolsEl = $('modelTools');
   const thinkingEl = $('modelThinking');
+  const healthEl = $('modelHealth');
   if (!ctxEl && !toolsEl) return;
   if (!name) {
     currentModelInfo = null;
@@ -2468,6 +2926,10 @@ async function loadModelInfo(name) {
       toolsEl.dataset.state = 'unknown';
     }
     if (thinkingEl) thinkingEl.textContent = 'thinking —';
+    if (healthEl) {
+      healthEl.textContent = 'provider —';
+      healthEl.dataset.state = 'unknown';
+    }
     return;
   }
   if (ctxEl) ctxEl.textContent = 'ctx …';
@@ -2475,8 +2937,12 @@ async function loadModelInfo(name) {
     toolsEl.textContent = 'tools …';
     toolsEl.dataset.state = 'unknown';
   }
+  if (healthEl) {
+    healthEl.textContent = 'provider …';
+    healthEl.dataset.state = 'unknown';
+  }
   try {
-    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/model_info?name=${encodeURIComponent(name)}`);
+    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/model_info?name=${encodeURIComponent(name)}&provider=${encodeURIComponent(settings.provider)}`);
     const info = await res.json();
     if (!info.ok || (settings.model && info.name !== settings.model)) return;
     currentModelInfo = info;
@@ -2502,11 +2968,21 @@ async function loadModelInfo(name) {
       thinkingEl.textContent = th === true ? 'thinking yes' : th === false ? 'thinking no' : 'thinking unknown';
       thinkingEl.dataset.state = th === true ? 'yes' : th === false ? 'no' : 'unknown';
     }
+    if (healthEl) {
+      healthEl.textContent = 'provider ok';
+      healthEl.dataset.state = 'yes';
+      healthEl.title = `${info.provider || settings.provider} is reachable`;
+    }
   } catch (e) {
     if (ctxEl) ctxEl.textContent = 'ctx —';
     if (toolsEl) {
       toolsEl.textContent = 'tools unknown';
       toolsEl.dataset.state = 'unknown';
+    }
+    if (healthEl) {
+      healthEl.textContent = 'provider err';
+      healthEl.dataset.state = 'no';
+      healthEl.title = `Could not reach ${settings.provider}`;
     }
   }
 }
@@ -2540,7 +3016,7 @@ function scoreModelForPreset(d, preset) {
 }
 
 function pickModelFor(preset, details) {
-  const list = (details || modelDetailsCache).filter((d) => d && !isCloudModel(d.name));
+  const list = (details || modelDetailsCache).filter((d) => d);
   if (!list.length) return null;
   return [...list].sort((a, b) => scoreModelForPreset(b, preset) - scoreModelForPreset(a, preset))[0].name;
 }
@@ -2556,7 +3032,7 @@ function updatePresetHighlight() {
 function applyPreset(preset) {
   const name = pickModelFor(preset);
   if (!name) {
-    appendStatus('✖ No local models available for this preset.');
+    appendStatus('✖ No models available for this preset.');
     return;
   }
   settings.model = name;
@@ -2829,6 +3305,9 @@ function autoGrow() {
 
 // ---------------- wiring ----------------
 function init() {
+  // Check voice recognition support
+  checkVoiceSupport();
+  
   // Settings initialized from storage
   refreshActiveTabProfile();
   if (chrome.tabs && chrome.tabs.onActivated) {
@@ -2838,6 +3317,9 @@ function init() {
   }
 
   $('send').addEventListener('click', sendMessage);
+  if (micBtn) {
+    micBtn.addEventListener('click', startListening);
+  }
   inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -2878,9 +3360,58 @@ function init() {
   $('serverUrl').addEventListener('change', (e) => {
     settings.serverUrl = e.target.value.trim() || DEFAULT_SERVER;
     saveSettings();
-    checkHealth();
-    loadModels();
+    loadProviders(); // Reload providers and models for new server
   });
+  $('opencodeUrl').addEventListener('change', (e) => {
+    settings.opencodeUrl = e.target.value.trim() || 'http://127.0.0.1:4096';
+    saveSettings();
+    // Notify server of new OpenCode URL
+    fetch(`${settings.serverUrl || DEFAULT_SERVER}/providers/opencode-url`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: settings.opencodeUrl }),
+    }).catch(() => {});
+    // Reload models for the new OpenCode URL
+    if (settings.provider === 'opencode') {
+      loadModels();
+    }
+  });
+  if ($('saveOpencodeAuth')) {
+    $('saveOpencodeAuth').addEventListener('click', async () => {
+      const password = $('opencodePassword').value.trim();
+      if (!password) {
+        appendStatus('✖ Please enter OpenCode password');
+        return;
+      }
+      settings.opencodeAuth = { type: 'basic', password };
+      saveSettings();
+      $('clearOpencodeAuth').style.display = 'inline-flex';
+      // Notify server of new OpenCode auth
+      await fetch(`${settings.serverUrl || DEFAULT_SERVER}/providers/opencode-auth`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auth: settings.opencodeAuth }),
+      }).catch(() => {});
+      appendStatus('✓ OpenCode password saved');
+      await loadModels();
+    });
+  }
+  if ($('clearOpencodeAuth')) {
+    $('clearOpencodeAuth').addEventListener('click', async () => {
+      settings.opencodeAuth = null;
+      saveSettings();
+      $('opencodePassword').value = '';
+      $('clearOpencodeAuth').style.display = 'none';
+      // Notify server to clear OpenCode auth
+      await fetch(`${settings.serverUrl || DEFAULT_SERVER}/providers/opencode-auth`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auth: null }),
+      }).catch(() => {});
+      appendStatus('✓ OpenCode password cleared');
+      await loadModels();
+    });
+  }
   $('modelSelect').addEventListener('change', (e) => {
     settings.model = e.target.value;
     saveSettings();
@@ -2932,6 +3463,9 @@ function init() {
     settings.autoPrompt = e.target.checked;
     saveSettings();
   });
+  if ($('requestMicPermBtn')) {
+    $('requestMicPermBtn').addEventListener('click', requestMicPermissionManual);
+  }
   $('researchMode').addEventListener('change', (e) => {
     settings.researchMode = e.target.value;
     saveSettings();
@@ -2941,12 +3475,27 @@ function init() {
   $('sessionBtn').addEventListener('click', () => respondApproval(true, 'session'));
   $('alwaysBtn').addEventListener('click', () => respondApproval(true, 'always'));
   $('denyBtn').addEventListener('click', () => respondApproval(false, 'once'));
+  
+  // Provider and API key event listeners
+  if ($('providerSelect')) {
+    $('providerSelect').addEventListener('change', onProviderChange);
+  }
+  if ($('saveApiKey')) {
+    $('saveApiKey').addEventListener('click', saveApiKey);
+  }
+  if ($('clearApiKey')) {
+    $('clearApiKey').addEventListener('click', clearApiKey);
+  }
+  if ($('apiKeyInput')) {
+    $('apiKeyInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') saveApiKey();
+    });
+  }
 
   loadSettings().then(() => {
     if (settings.projectRoot) applyProject(settings.projectRoot);
     else refreshProjectStatus();
     checkHealth();
-    loadModels();
   });
 }
 

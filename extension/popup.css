@@ -1147,6 +1147,43 @@ details.section[open] > summary {
 
 .composer-actions { display: flex; gap: 6px; align-items: center; }
 
+/* Microphone button */
+#micBtn {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color var(--transition), border-color var(--transition),
+    color var(--transition), box-shadow var(--transition), transform var(--transition);
+}
+#micBtn:hover {
+  background: var(--surface-2);
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: translateY(-1px);
+}
+#micBtn:active { transform: translateY(1px) scale(0.97); }
+#micBtn:focus-visible { outline: none; box-shadow: var(--focus); }
+#micBtn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+#micBtn.listening {
+  background: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
+  animation: mic-pulse 1s ease-in-out infinite;
+  box-shadow: 0 0 0 3px rgba(225, 29, 72, 0.15);
+}
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(225, 29, 72, 0.15); }
+  50% { box-shadow: 0 0 0 8px rgba(225, 29, 72, 0.08); }
+}
+
 .send-btn {
   width: 38px;
   height: 38px;
