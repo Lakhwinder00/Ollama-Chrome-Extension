@@ -28,6 +28,26 @@ const MAX_HISTORY = 80;
  *  means the model is stuck, so the run is wrapped up with a final answer. */
 const MAX_STAGNANT_STEPS = 5;
 
+// ---------------------------------------------------------------------------
+// Context budget
+//
+// Browsing a site produces a lot of text (page dumps, DOM snapshots) and every
+// change adds a picture. A long run can easily overflow the model's context —
+// Ollama then silently drops the oldest messages and the agent loses the task
+// (or the request fails with "no user query found"). So the history is trimmed
+// to a character budget: the system prompt and the original request always
+// stay, the oldest turns in between are replaced by a one-line summary.
+// ---------------------------------------------------------------------------
+
+/** A browse may take many steps (a form can be 30+ clicks) — but not forever. */
+const MAX_ITERATIONS = 100;
+/** How much history travels with every model call (~4.5k tokens). */
+const MAX_CONTEXT_CHARS = 18000;
+/** The original request may carry a whole page or an attached document. */
+const MAX_TASK_CHARS = 6000;
+/** Pictures are the expensive part — only the newest ones stay. */
+const MAX_HISTORY_IMAGES = 3;
+
 const PLAN_PROMPT =
   "Before using any tools, think step by step about the user's request: what you need to inspect, what you plan to change, and why. Describe your plan briefly, then stop. Do not call any tools yet.";
 
@@ -132,6 +152,108 @@ function loadProjectRules(root) {
   return '';
 }
 
+/** Rough size of a message in characters (a picture counts as 4k). */
+function messageSize(m) {
+  const text = String((m && m.content) || '').length;
+  const images = m && Array.isArray(m.images) ? m.images.length : 0;
+  return text + images * 4000;
+}
+
+/** A one-line memory of the turns that were dropped. */
+function summariseDropped(messages) {
+  const tools = [];
+  let steps = 0;
+  for (const m of messages) {
+    if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {
+      for (const tc of m.tool_calls) {
+        const fn = (tc && tc.function) || {};
+        const name = String(fn.name || 'tool');
+        if (!tools.includes(name)) tools.push(name);
+        steps++;
+      }
+    }
+  }
+  const what = tools.length ? tools.join(', ') : 'the earlier steps';
+  return {
+    role: 'user',
+    content:
+      `[${steps} earlier step(s) were removed to fit the context window (${what}). ` +
+      'Their output is gone — re-read what you still need (get_page, get_dom, read_file) before acting on it.]',
+  };
+}
+
+/**
+ * Keep the history inside the context budget: system prompt + original task
+ * + the newest turns. The middle is replaced by a short summary, so the model
+ * still knows what it did but not the noise.
+ */
+function trimHistory(history, budget) {
+  const limit = budget || MAX_CONTEXT_CHARS;
+  const list = Array.isArray(history) ? history : [];
+  const total = list.reduce((n, m) => n + messageSize(m), 0);
+  if (total <= limit) return list;
+
+  const system = list.filter((m) => m.role === 'system');
+  const rest = list.filter((m) => m.role !== 'system');
+
+  // The first user turn is the task — it is never dropped.
+  const firstUser = rest.findIndex((m) => m.role === 'user');
+  const head = [];
+  if (firstUser !== -1) {
+    head.push(rest[firstUser]);
+    rest.splice(firstUser, 1);
+  }
+  if (head.length && messageSize(head[0]) > MAX_TASK_CHARS) {
+    head[0] = {
+      role: 'user',
+      content:
+        String(head[0].content || '').slice(0, MAX_TASK_CHARS) +
+        '\n…(the beginning of your request was trimmed to fit the context window)',
+    };
+  }
+
+  // Keep the newest turns that still fit.
+  const kept = [];
+  let used =
+    system.reduce((n, m) => n + messageSize(m), 0) +
+    head.reduce((n, m) => n + messageSize(m), 0);
+  for (let i = rest.length - 1; i >= 0; i--) {
+    const size = messageSize(rest[i]);
+    if (used + size > limit) break;
+    kept.unshift(rest[i]);
+    used += size;
+  }
+  const dropped = rest.slice(0, rest.length - kept.length);
+
+  // A tool message without its assistant (or the other way round) upsets the
+  // API — drop the orphaned edges.
+  while (kept.length && kept[0].role === 'tool') kept.shift();
+  if (kept.length && kept[0].role === 'assistant' && kept[0].tool_calls) {
+    kept[0] = { role: 'assistant', content: kept[0].content || '' };
+  }
+
+  // Only the newest screenshots stay — they are the expensive part.
+  let imagesLeft = MAX_HISTORY_IMAGES;
+  for (let i = kept.length - 1; i >= 0; i--) {
+    if (Array.isArray(kept[i].images) && kept[i].images.length) {
+      if (imagesLeft > 0) imagesLeft -= kept[i].images.length;
+      else kept[i] = { role: kept[i].role, content: kept[i].content };
+    }
+  }
+
+  const note = dropped.length ? [summariseDropped(dropped)] : [];
+  return [...system, ...head, ...note, ...kept];
+}
+
+/** Trim the history in place (the loop keeps one array reference). */
+function trimHistoryInPlace(history, budget) {
+  const trimmed = trimHistory(history, budget);
+  if (trimmed === history) return history;
+  history.length = 0;
+  history.push(...trimmed);
+  return history;
+}
+
 function ensureSystemMessage(messages) {
   const system = { role: 'system', content: buildSystemPrompt() };
   const list = Array.isArray(messages) ? messages.slice() : [];
@@ -150,9 +272,10 @@ function ensureSystemMessage(messages) {
       const firstNonSystem = trimmed.findIndex((m) => m.role !== 'system');
       trimmed.splice(firstNonSystem === -1 ? trimmed.length : firstNonSystem, 0, { role: 'user', content: ask });
     }
-    return trimmed;
+    // A long session can still be over the context budget — trim it.
+    return trimHistory(trimmed);
   }
-  return list;
+  return trimHistory(list);
 }
 
 /** Inject a scope-specific system prompt instead of the default one. */
@@ -172,9 +295,10 @@ function ensureScopeMessage(messages, scopePrompt) {
       const firstNonSystem = trimmed.findIndex((m) => m.role !== 'system');
       trimmed.splice(firstNonSystem === -1 ? trimmed.length : firstNonSystem, 0, { role: 'user', content: ask });
     }
-    return trimmed;
+    // A long session can still be over the context budget — trim it.
+    return trimHistory(trimmed);
   }
-  return list;
+  return trimHistory(list);
 }
 
 function summarizeResult(result) {
@@ -211,7 +335,7 @@ function resultDetail(result) {
 }
 
 /** Trim a tool result before storing it in history (bounds context growth). */
-function historyResult(result) {
+function historyResult(result, max) {
   let s;
   if (typeof result === 'string') s = result;
   else {
@@ -221,7 +345,7 @@ function historyResult(result) {
       s = String(result);
     }
   }
-  const MAX = 8000;
+  const MAX = max || 8000;
   return s.length > MAX ? s.slice(0, MAX) + `\n...(truncated ${s.length - MAX} chars)` : s;
 }
 
@@ -672,11 +796,17 @@ async function runAgent({
     }
   }
 
-  // No step limit — the run ends when the model answers, the user stops it,
-  // or MAX_STAGNANT_STEPS consecutive steps produce no new tool output.
+  // A browse can take a lot of steps (a form is 30+ clicks), so the limit is
+  // generous. The run also ends when the model answers, the user stops it, or
+  // MAX_STAGNANT_STEPS consecutive steps produce no new tool output.
+  let hitStepLimit = false;
   for (let step = 1; ; step++) {
     if (signal && signal.aborted) {
       return { content: 'Stopped by the user.', history, stopped: true };
+    }
+    if (step > MAX_ITERATIONS) {
+      hitStepLimit = true;
+      break;
     }
     onEvent({ type: 'status', message: step === 1 ? 'Thinking…' : `Step ${step}: continuing…` });
 
@@ -823,7 +953,7 @@ async function runAgent({
         result = { error: String((e && e.message) || e) };
         onEvent({ type: 'tool_result', name, ok: false, error: result.error });
       }
-      const toolMessage = { role: 'tool', content: historyResult(result) };
+      const toolMessage = { role: 'tool', content: historyResult(result, BROWSER_TOOLS.has(name) ? 4000 : 8000) };
       if (image) {
         if (vision) {
           toolMessage.images = [imageToBase64(image)];
@@ -834,6 +964,10 @@ async function runAgent({
       }
       history.push(toolMessage);
     }
+
+    // Keep the context inside the budget: a long browse adds page dumps, DOM
+    // snapshots and screenshots. The oldest turns are summarized away.
+    trimHistoryInPlace(history);
 
     if (sawNewOutput) {
       stagnantSteps = 0;
@@ -850,9 +984,11 @@ async function runAgent({
   const isPageAction = isPageActionRequest(history);
   onEvent({
     type: 'status',
-    message: isPageAction
-      ? `No new progress after ${MAX_STAGNANT_STEPS} repeated steps — finishing with a summary of what changed…`
-      : `No new progress after ${MAX_STAGNANT_STEPS} repeated steps — finishing with a researched answer and a summary…`,
+    message: hitStepLimit
+      ? `Step limit reached (${MAX_ITERATIONS} steps) — finishing with a summary of what was done…`
+      : isPageAction
+        ? `No new progress after ${MAX_STAGNANT_STEPS} repeated steps — finishing with a summary of what changed…`
+        : `No new progress after ${MAX_STAGNANT_STEPS} repeated steps — finishing with a researched answer and a summary…`,
   });
   const synthesized = await synthesizeFinalAnswer({ history, provider, model, signal, onEvent });
   if (synthesized) {
@@ -865,7 +1001,14 @@ async function runAgent({
     const fallback = await runWebResearchFallback(history, onEvent);
     answer = (fallback && fallback.content) || null;
   }
-  const summary = progressSummary(history, answer ? 'Run details:' : undefined);
+  const summary = progressSummary(
+    history,
+    answer
+      ? 'Run details:'
+      : hitStepLimit
+        ? `I reached the step limit (${MAX_ITERATIONS} steps) before finishing. Here is what I did:`
+        : undefined
+  );
   const content = answer ? `${answer}\n\n---\n\n${summary}` : summary;
   history.push({ role: 'assistant', content });
   return { content, history };
@@ -876,6 +1019,9 @@ module.exports = {
   buildSystemPrompt,
   DANGEROUS_TOOLS,
   MAX_STAGNANT_STEPS,
+  MAX_ITERATIONS,
+  MAX_CONTEXT_CHARS,
+  trimHistory,
   convertToolCallObject,
   parseToolCallsFromContent,
   normalizeToolCalls,

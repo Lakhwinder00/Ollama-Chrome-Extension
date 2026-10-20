@@ -176,6 +176,13 @@
           <p class="hint">Autonomy applies to browser changes. File, shell and git operations always ask for approval.</p>
         </div>
         <div class="control-group">
+          <label class="checkbox">
+            <input id="verifyShot" type="checkbox" checked />
+            Show the model a screenshot after each page change
+          </label>
+          <p class="hint">The agent looks at the page again after every click, typing or edit, so it can check its own work. Needs a vision-capable model.</p>
+        </div>
+        <div class="control-group">
           <span class="label">Research</span>
           <select id="researchMode" title="How much of the page is sent to the model">
             <option value="full">Full page research</option>
@@ -248,6 +255,7 @@
   </section>
 
   <footer class="composer">
+    <div class="attachments" id="attachments" hidden></div>
     <div class="composer-meta">
       <span class="context-chip" id="contextChip">Context: Full page</span>
       <span class="scope-chip" id="scopeChip" data-scope="research" hidden>Research</span>
@@ -255,14 +263,18 @@
     <div class="composer-row">
       <textarea id="input" rows="1" placeholder="Ask anything…  ⏎ send"></textarea>
       <div class="composer-actions">
+        <button id="attachBtn" class="btn secondary icon" title="Attach a document or image" aria-label="Attach a file">📎</button>
         <button id="micBtn" class="btn secondary icon" title="Voice input (click to speak)" aria-label="Voice input">🎤</button>
         <button id="send" class="send-btn">➤</button>
       </div>
     </div>
+    <input type="file" id="fileInput" multiple hidden
+      accept="image/*,.pdf,.txt,.md,.markdown,.csv,.tsv,.json,.yaml,.yml,.xml,.html,.htm,.docx,.xlsx,.pptx,.odt,.ods,.log,.ini,.conf,.toml,.js,.ts,.jsx,.tsx,.py,.rb,.go,.rs,.java,.c,.h,.cpp,.cs,.php,.sh,.ps1,.sql,.zip" />
   </footer>
 
   <script src="markdown.js"></script>
   <script src="intent.js"></script>
+  <script src="extract.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

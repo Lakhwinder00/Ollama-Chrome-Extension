@@ -9,6 +9,8 @@
  */
 
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { URL } = require('url');
 const {
   OllamaProvider,
@@ -185,6 +187,71 @@ function requestApprovalFactory(emit, session) {
 }
 
 // ---------------------------------------------------------------------------
+// Attachments: a document sent by the user is stored in the project, so the
+// agent can read the whole file with read_file instead of only the excerpt
+// that travelled in the message.
+// ---------------------------------------------------------------------------
+const MAX_IMAGES = 4;
+
+/** Save the text of an attached document inside the project. */
+function saveAttachment(name, text) {
+  const root = getProjectRoot();
+  if (!root || !text) return null;
+  try {
+    const dir = path.join(root, '.myagent', 'attachments');
+    fs.mkdirSync(dir, { recursive: true });
+    const safe =
+      String(name || 'attachment')
+        .replace(/[^\w.\- ]+/g, '_')
+        .replace(/\s+/g, '_')
+        .slice(0, 80) || 'attachment';
+    const file = path.join(dir, safe.toLowerCase().endsWith('.txt') ? safe : `${safe}.txt`);
+    fs.writeFileSync(file, text, 'utf8');
+    return path.relative(root, file).split(path.sep).join('/');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build the user turn: the request (the client already put the document text
+ * in it), a pointer to the saved copies, and the pictures for a vision model.
+ */
+function buildUserTurn({ message, attachments, images, vision }) {
+  const docs = (Array.isArray(attachments) ? attachments : [])
+    .filter((a) => a && typeof a.text === 'string' && a.text.trim())
+    .slice(0, 5);
+
+  const saved = [];
+  for (const doc of docs) {
+    const rel = saveAttachment(doc.name, doc.text);
+    if (rel) saved.push(`${doc.name} → ${rel}`);
+  }
+
+  const pictures = (Array.isArray(images) ? images : [])
+    .filter((i) => typeof i === 'string' && /^data:image\//.test(i))
+    .slice(0, MAX_IMAGES);
+
+  let content = message;
+  if (saved.length) {
+    content +=
+      `\n\n[The attached document(s) are also saved in the project: ${saved.join(', ')} — ` +
+      'read them with read_file when you need more than the excerpt above.]';
+  }
+  if (pictures.length && !vision) {
+    content +=
+      '\n\n[An image was attached, but this model cannot look at images — describe what you need instead.]';
+  }
+
+  const turn = { role: 'user', content };
+  if (pictures.length && vision) {
+    // The data URL is kept: every provider strips what it does not need.
+    turn.images = pictures;
+  }
+  return { turn, saved, pictureCount: pictures.length };
+}
+
+// ---------------------------------------------------------------------------
 // Browser tools: the agent asks the extension (via SSE) to run a tool in the
 // active tab; the extension posts the result back to /browser/result.
 // ---------------------------------------------------------------------------
@@ -355,11 +422,25 @@ async function handleChat(req, res) {
     );
   }
 
-  session.messages.push({ role: 'user', content: userMessage });
-
   const caps = await getCapabilities(provider);
   const think = !!(caps[session.model] && caps[session.model].has('thinking'));
   const vision = !!(caps[session.model] && caps[session.model].has('vision'));
+
+  // The user may attach documents and pictures: the documents travel in the
+  // message (and are saved in the project), the pictures go to a vision model.
+  const { turn, saved, pictureCount } = buildUserTurn({
+    message: userMessage,
+    attachments: body.attachments,
+    images: body.images,
+    vision,
+  });
+  session.messages.push(turn);
+  if (saved.length) {
+    emit('status', { message: `📎 Saved ${saved.length} attachment(s) in the project.` });
+  }
+  if (pictureCount && !vision) {
+    emit('status', { message: '⚠ This model cannot look at images — the picture was not sent.' });
+  }
 
   // Two-scope routing: decide whether this is a current-page task or research.
   // The client may send a composed message (page frame + instructions); the
@@ -409,6 +490,9 @@ async function handleChat(req, res) {
       provider: provider.name,
       project: getProjectRoot(),
       tools: tools.length ? toolsSupported : false,
+      // The extension only sends verification screenshots when the model can
+      // actually look at them.
+      vision: !!vision,
       scope,
     });
     const result = await runAgent({

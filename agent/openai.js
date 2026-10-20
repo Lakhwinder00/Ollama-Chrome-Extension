@@ -105,16 +105,29 @@ async function showModel(name, apiKey) {
   };
 }
 
+/** Map one message to the OpenAI format (pictures become image_url parts). */
+function toOpenAIMessage(m) {
+  const images = Array.isArray(m.images) ? m.images : [];
+  const base = {
+    role: m.role,
+    ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
+    ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
+  };
+  if (!images.length) {
+    return { ...base, content: m.content };
+  }
+  const parts = [{ type: 'text', text: typeof m.content === 'string' ? m.content : '' }];
+  for (const image of images) {
+    parts.push({ type: 'image_url', image_url: { url: image } });
+  }
+  return { ...base, content: parts };
+}
+
 /** Non-streaming chat completion. */
 async function chat({ model, messages, tools, think, signal, apiKey }) {
   const payload = {
     model,
-    messages: messages.map(m => ({
-      role: m.role,
-      content: m.content,
-      ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
-      ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
-    })),
+    messages: messages.map(toOpenAIMessage),
     ...(tools && tools.length ? { tools } : {}),
     ...(think && !model.startsWith('o1') ? { reasoning_effort: 'medium' } : {}),
   };
@@ -155,12 +168,7 @@ async function chat({ model, messages, tools, think, signal, apiKey }) {
 async function chatStream({ model, messages, tools, think, onDelta, signal, apiKey }) {
   const payload = {
     model,
-    messages: messages.map(m => ({
-      role: m.role,
-      content: m.content,
-      ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
-      ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
-    })),
+    messages: messages.map(toOpenAIMessage),
     stream: true,
     ...(tools && tools.length ? { tools } : {}),
     ...(think && !model.startsWith('o1') ? { reasoning_effort: 'medium' } : {}),

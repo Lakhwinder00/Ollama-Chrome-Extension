@@ -88,7 +88,15 @@ async function showModel(name) {
   };
 }
 
-/** Convert messages to Anthropic format. */
+/** Split a data URL into its media type and its base64 payload. */
+function splitDataUrl(dataUrl) {
+  const s = String(dataUrl || '');
+  const match = /^data:([^;,]+);base64,(.*)$/s.exec(s);
+  if (!match) return { mediaType: 'image/png', data: s };
+  return { mediaType: match[1] || 'image/png', data: match[2] || '' };
+}
+
+/** Convert messages to Anthropic format (pictures become image blocks). */
 function toAnthropicMessages(messages) {
   const systemMessages = messages.filter(m => m.role === 'system');
   const userAssistantMessages = messages.filter(m => m.role !== 'system');
@@ -98,10 +106,19 @@ function toAnthropicMessages(messages) {
     system = systemMessages.map(m => m.content).join('\n\n');
   }
 
-  const messagesOut = userAssistantMessages.map(m => ({
-    role: m.role === 'assistant' ? 'assistant' : 'user',
-    content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
-  }));
+  const messagesOut = userAssistantMessages.map(m => {
+    const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+    const images = Array.isArray(m.images) ? m.images : [];
+    if (!images.length) {
+      return { role: m.role === 'assistant' ? 'assistant' : 'user', content: text };
+    }
+    const blocks = [{ type: 'text', text }];
+    for (const image of images) {
+      const { mediaType, data } = splitDataUrl(image);
+      blocks.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data } });
+    }
+    return { role: m.role === 'assistant' ? 'assistant' : 'user', content: blocks };
+  });
 
   // Ensure at least one user message
   if (!messagesOut.some(m => m.role === 'user')) {

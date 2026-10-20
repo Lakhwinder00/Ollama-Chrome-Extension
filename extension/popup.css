@@ -1097,6 +1097,61 @@ details.section[open] > summary {
 .composer-row { display: flex; align-items: flex-end; gap: 8px; }
 .composer-meta { display: flex; align-items: center; min-height: 0; }
 .composer-meta:empty { display: none; }
+
+/* --- attached files --- */
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.attachments[hidden] { display: none; }
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 6px 4px 8px;
+  font-size: 11px;
+  background: var(--surface-2, #f4f5f7);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.attach-chip.is-image { padding-left: 4px; }
+.attach-chip img {
+  width: 22px;
+  height: 22px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+.attach-icon { font-size: 12px; }
+.attach-name {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attach-remove {
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 3px;
+  border-radius: 4px;
+  line-height: 1;
+}
+.attach-remove:hover { color: var(--danger); background: rgba(220, 53, 69, 0.12); }
+.attach-note {
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--text-3);
+  font-family: var(--mono);
+  word-break: break-word;
+}
+.msg.user .attach-note { text-align: right; }
 .context-chip {
   font-size: 10px;
   font-family: var(--mono);

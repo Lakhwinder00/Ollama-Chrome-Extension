@@ -12,10 +12,12 @@ const TOOLS_BY_SCOPE = {
   page: [
     'get_dom', 'get_page', 'screenshot', 'scroll', 'click', 'type', 'key',
     'edit_element', 'add_element', 'delete_element', 'navigate', 'search',
+    'list_tabs', 'switch_tab', 'open_tab', 'close_tab', 'click_at',
   ],
   research: [
     'web_search', 'find_best_link', 'fetch_url', 'search', 'navigate',
     'get_dom', 'get_page', 'screenshot', 'scroll',
+    'list_tabs', 'switch_tab', 'open_tab', 'close_tab',
   ],
   both: 'all',
 };
@@ -117,8 +119,17 @@ function buildScopePrompt(scope, page, mode, task) {
       `5. ${modeLine} Show old -> new text for edits.`,
       '6. Finish with a short summary of what changed.',
       '',
+      'Working with the browser:',
+      '- After every click, typing or edit you get a picture of the page. Look at',
+      '  it: if the change did not happen, fix it instead of reporting success.',
+      '- Prefer the element index from get_dom. When an element has no handle',
+      '  (canvas, image, custom widget, or anything in a frame), take a screenshot',
+      '  and use click_at with the position you see in the image.',
+      '- Other tabs: list_tabs finds them, switch_tab makes one active, open_tab',
+      '  and close_tab are for pages you need — always close what you opened.',
+      '',
       page ? `PAGE: ${page.title || 'Untitled'} | ${page.url || ''}` : 'PAGE: (unavailable)',
-      page && page.text ? `PAGE CONTENT:\n${page.text.slice(0, 8000)}` : '',
+      page && page.text ? `PAGE CONTENT:\n${page.text.slice(0, 5000)}` : '',
       `TASK: ${task}`,
     ]
       .filter((l) => l !== '')

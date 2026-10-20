@@ -31,7 +31,8 @@ User → Ollama ("I need to read login.js")
 **Tools:** `read_file`, `write_file`, `edit_file`, `delete_file`, `list_directory`, `search_files`,
 `run_command`, `git_status`, `git_diff`, `git_log`, `git_branch`, `git_checkout`, `git_commit`,
 `web_search`, `fetch_url` (project/web) +
-`get_page`, `get_dom`, `click`, `type`, `key`, `scroll`, `navigate`, `search`, `screenshot` (browser).
+`get_page`, `get_dom`, `click`, `type`, `key`, `scroll`, `navigate`, `search`, `screenshot`,
+`list_tabs`, `switch_tab`, `open_tab`, `close_tab`, `click_at` (browser).
 
 **Safety built in:**
 - The agent can only touch files **inside the project root you choose** — every path is
@@ -70,6 +71,7 @@ It listens on `http://127.0.0.1:8787`. Optional env vars:
 | `HOST`         | `127.0.0.1`            | Bind address                     |
 | `OLLAMA_URL`   | `http://127.0.0.1:11434` | Ollama API base URL            |
 | `OLLAMA_MODEL` | `qwen2.5-coder:14b`    | Default model                    |
+| `OLLAMA_NUM_CTX` | `8192`               | Context window sent to Ollama — raise it (16384) for long browse sessions |
 
 ## Load the Chrome extension
 
@@ -100,6 +102,31 @@ Pick a model from the dropdown, then just ask it to fix a bug.
 > switch *Automation → Autonomy* to "confirm each change" or "describe only" —
 > and each change is highlighted live in your tab so you can watch it happen.
 
+> **Works like Claude in Chrome:**
+> - **Other tabs** — the agent can list the open tabs (`list_tabs`), work in one of
+>   them (`switch_tab`), open pages it needs (`open_tab`) and close them again
+>   (`close_tab`). Every browser tool also accepts a `tab_id`.
+> - **It sees the page** — with a vision-capable model the agent gets a picture
+>   of the tab after every click, typing or edit (*Show the model a screenshot
+>   after each page change*), so it can check its own work instead of guessing.
+> - **It can click anything** — when a widget has no usable DOM handle (canvas,
+>   image, custom control, cross-origin frame) it takes a screenshot and clicks
+>   the position it sees (`click_at`).
+> - **Frames included** — `get_dom` reads the frames of the page too, so fields
+>   inside an iframe are listed with the same numbering.
+> - **Right-click** — "Ask the agent about *…*" in the context menu opens the panel
+>   with your selection already in the input box.
+
+> **Attach a document or a picture** — the 📎 button (or a paste) adds files to
+> your next message:
+> - **Documents** (PDF, Word, Excel, PowerPoint, Markdown, code, CSV, …) are read
+>   into text and put in front of your request, so the model can act on them.
+>   A copy is saved in the project under `.myagent/attachments/`, and the agent
+>   is told the path — it can read the *whole* file with `read_file`.
+> - **Pictures** (PNG, JPG, WebP, GIF) are sent as images, so a vision-capable
+>   model can look at them. With a model that cannot see images the panel says
+>   so instead of failing silently.
+
 ## Server API
 
 | Endpoint      | Method | Body                                   | Returns                       |
@@ -110,7 +137,7 @@ Pick a model from the dropdown, then just ask it to fix a bug.
 | `/providers`  | GET    | —                                      | Available providers            |
 | `/project`    | GET    | —                                      | Current project root          |
 | `/project`    | POST   | `{ "root": "C:\\path" }`               | Set project root              |
-| `/chat`       | POST   | `{ sessionId?, message, userRequest?, model?, autoApprove? }` | Server-Sent Events stream |
+| `/chat`       | POST   | `{ sessionId?, message, userRequest?, attachments?, images?, model?, autoApprove? }` | Server-Sent Events stream |
 | `/approve`    | POST   | `{ "id": "…", "allowed": true, "scope": "once|session|always" }` | Resolve a pending approval |
 | `/browser/result` | POST | `{ "id": "…", "result" or "error" }` | Return a browser-tool result  |
 | `/stop`       | POST   | `{ "sessionId": "…" }`                 | Cancel a running turn         |
@@ -125,6 +152,14 @@ The extension sends two fields for the request:
 - `userRequest` — the user's own words, without any page text. The server routes the request
   (page work vs. research) on this, so a page that happens to contain the word "latest" cannot
   turn an edit into a research task.
+
+Attachments travel in two more fields:
+
+- `attachments` — `[{ name, text }]`, the documents the user attached (already read into text by
+  the extension). The server saves them in the project under `.myagent/attachments/` and tells the
+  model the path, so it can read the full file with `read_file`.
+- `images` — data URLs of the pictures the user attached. They are only sent to the model when it
+  supports vision.
 
 Quick test without the extension:
 
@@ -219,7 +254,8 @@ npm test
 Covers path-traversal safety, read/write/edit/delete/list/search, git tools
 (including `git_commit`/`git_checkout`), tool-call normalization, the provider
 contract, the always-allow permission store, the server's origin/host policy,
-the credential store, and the extension's request-intent helpers.
+the credential store, the extension's request-intent helpers, and the browser
+tool set (tab control, coordinate clicks, scope routing).
 
 ## Project layout
 
@@ -249,14 +285,19 @@ tests/
   secrets.test.js   provider credential store
   http-security.test.js origin/host policy
   intent.test.js    extension request-intent helpers
+  browser-tools.test.js tab control, frame clicks, scope routing
+  extract.test.js   PDF/Word/Excel/text attachment readers
+  attachments.test.js attachments in the message and the project
+  context.test.js   context budget, history trimming, step limit
 extension/
   manifest.json MV3 manifest (side panel)
   sidepanel.html right-side panel UI
   popup.css     dark Claude-style theme
   popup.js      SSE streaming client, approvals, browser tools, persistence
   intent.js     request intent helpers (edit? research? ambiguous?)
+  extract.js    attachment readers (PDF / Word / Excel / text / image)
   markdown.js   Markdown renderer + syntax highlighting
-  background.js opens the side panel on toolbar click
+  background.js opens the side panel, adds the right-click entries
 ```
 
 ## Roadmap status
@@ -277,12 +318,21 @@ extension/
   "… still working, waiting for the model (Ns)" line appears every ~12s while the model is
   silent. Web searches/fetches time out after 15–20s instead of hanging, and research reads
   announce "Reading source 1/3…" as it goes.
-- **"No new progress after 5 repeated steps"** — there is no step limit: a run only ends when
-  the model answers or you stop it. If the model gets stuck repeating the same blocked action,
-  it is first asked twice for a plain-text final answer (JSON-only replies are retried),
-  and if that fails the question is **researched from scratch** (search + reads) and answered,
-  with the list of tool calls, outcomes, and any page/file changes appended. Reply **continue**
-  to resume from there. The old "Stopped: maximum steps reached." message no longer exists —
-  if you still see it, restart `agent/server.js` (old code in memory) and press **Clear History**.
+- **"No new progress after 5 repeated steps"** — a run ends when the model answers, you stop it,
+  the model repeats the same blocked action 5 times, or it reaches the **100-step limit**. If the
+  model gets stuck repeating the same blocked action, it is first asked twice for a plain-text
+  final answer (JSON-only replies are retried), and if that fails the question is **researched
+  from scratch** (search + reads) and answered, with the list of tool calls, outcomes, and any
+  page/file changes appended. Reply **continue** to resume from there.
+- **"Step limit reached (100 steps)"** — the task was too big for one run (a long form, many
+  pages). The run still ends with a summary of everything it did; send **continue** to pick up
+  from there. Split the task into smaller steps to get further.
+- **The model forgets the task on a long browse** — it should not: the history is trimmed to a
+  fixed budget (~18 000 characters). The system prompt and your original request always stay,
+  the oldest turns are replaced by a one-line note ("*N earlier steps were removed…*"), and only
+  the three newest screenshots are kept. If the model needs something that was trimmed away, it
+  is told to re-read it with `get_page` / `get_dom` / `read_file`.
+- **Context overflow / "no user query found in messages"** — raise the context window:
+  `OLLAMA_NUM_CTX=16384` (or bigger) before starting the server. The default is 8192.
 - **Model doesn't call tools** — use a tools-capable model (`qwen2.5-coder:14b`).
 - **"Access denied"** — the path resolved outside the project root; set the right project.

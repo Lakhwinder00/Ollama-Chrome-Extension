@@ -43,6 +43,7 @@ let settings = {
   autoPrompt: true,
   researchMode: 'full',
   autonomy: 'auto',
+  verifyWithScreenshot: true,
   searchProvider: 'google',
   contextMode: 'full',
   opencodeUrl: 'http://127.0.0.1:4096',
@@ -57,6 +58,8 @@ let streaming = false;
 let activeController = null;
 let runStartedAt = 0;
 let runTicker = null;
+// True when the model behind the current session can look at screenshots.
+let sessionVision = false;
 
 // ---------------- storage ----------------
 async function loadSettings() {
@@ -76,6 +79,7 @@ async function loadSettings() {
   $('autoPrompt').checked = settings.autoPrompt !== false;
   $('researchMode').value = settings.researchMode || 'full';
   if ($('autonomy')) $('autonomy').value = settings.autonomy || 'auto';
+  if ($('verifyShot')) $('verifyShot').checked = settings.verifyWithScreenshot !== false;
   if ($('searchProvider')) $('searchProvider').value = settings.searchProvider || 'google';
   if ($('contextMode')) $('contextMode').value = settings.contextMode || 'full';
   if ($('opencodeUrl')) $('opencodeUrl').value = settings.opencodeUrl || 'http://127.0.0.1:4096';
@@ -639,6 +643,124 @@ function endRun(state) {
   clearAgentMarkers();
 }
 
+// ---------------- attachments ----------------
+// Files the user attaches to the next message: documents become text, images
+// stay images.
+const attachments = [];
+const MAX_FILE_BYTES = 12 * 1024 * 1024;
+// How much of a document travels in the message. The whole file is saved in
+// the project, so the agent can read the rest with read_file.
+const MAX_ATTACHMENT_CHARS = 20000;
+
+function formatBytes(bytes) {
+  if (!bytes) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/** Read the picked files: documents to text, images to data URLs. */
+async function handlePickedFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  for (const file of files) {
+    if (file.size > MAX_FILE_BYTES) {
+      appendStatus(`✖ ${file.name} is too large (${formatBytes(file.size)}).`);
+      continue;
+    }
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const result = await readAttachment(file.name, bytes);
+      if (result.kind === 'unsupported') {
+        appendStatus(`✖ ${file.name}: ${result.note}`);
+        continue;
+      }
+      if (result.kind === 'text') {
+        const full = result.text || '';
+        const text = full.length > MAX_ATTACHMENT_CHARS ? full.slice(0, MAX_ATTACHMENT_CHARS) : full;
+        attachments.push({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: file.name,
+          kind: result.kind,
+          text,
+          truncated: full.length > text.length,
+          dataUrl: '',
+          size: file.size,
+        });
+        appendStatus(
+          `📎 ${file.name} attached (${full.length} characters` +
+            (full.length > text.length ? ', showing the first part' : '') +
+            ').'
+        );
+      } else {
+        attachments.push({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          name: file.name,
+          kind: result.kind,
+          text: '',
+          dataUrl: result.dataUrl || '',
+          size: file.size,
+        });
+        appendStatus(
+          `🖼 ${file.name} attached.` +
+            (sessionVision ? '' : ' ⚠ This model cannot look at images.')
+        );
+      }
+    } catch (e) {
+      appendStatus(`✖ ${file.name} could not be read: ${(e && e.message) || e}`);
+    }
+  }
+  renderAttachments();
+}
+
+function renderAttachments() {
+  const box = $('attachments');
+  if (!box) return;
+  box.innerHTML = '';
+  for (const item of attachments) {
+    const chip = document.createElement('div');
+    chip.className = 'attach-chip' + (item.kind === 'image' ? ' is-image' : '');
+
+    if (item.kind === 'image' && item.dataUrl) {
+      const img = document.createElement('img');
+      img.src = item.dataUrl;
+      img.alt = item.name;
+      chip.appendChild(img);
+    } else {
+      const icon = document.createElement('span');
+      icon.className = 'attach-icon';
+      icon.textContent = '📄';
+      chip.appendChild(icon);
+    }
+
+    const name = document.createElement('span');
+    name.className = 'attach-name';
+    name.textContent = item.name;
+    name.title = `${item.name} · ${formatBytes(item.size)}`;
+    chip.appendChild(name);
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'attach-remove';
+    remove.textContent = '✕';
+    remove.title = 'Remove this file';
+    remove.addEventListener('click', () => {
+      const i = attachments.indexOf(item);
+      if (i !== -1) attachments.splice(i, 1);
+      renderAttachments();
+    });
+    chip.appendChild(remove);
+
+    box.appendChild(chip);
+  }
+  box.hidden = attachments.length === 0;
+}
+
+function clearAttachments() {
+  attachments.length = 0;
+  renderAttachments();
+}
+
 // ---------------- rendering ----------------
 function scrollToBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -688,6 +810,7 @@ function renderItem(item) {
     bubble.className = 'bubble';
     bubble.textContent = item.text;
     wrap.appendChild(bubble);
+    appendAttachmentNote(wrap, item.attachments);
     lastBlock = { type: 'user', wrap };
   } else if (item.role === 'assistant') {
     const wrap = appendEl('msg assistant' + (item.interim ? ' interim' : ''));
@@ -738,13 +861,31 @@ function attachToolDetail(block, detail) {
   block.resultEl.addEventListener('click', () => detailEl.classList.toggle('hidden'));
 }
 
-function appendUser(text) {
-  transcript.push({ role: 'user', text });
+/** The "📎 report.pdf" line under a user bubble. */
+function appendAttachmentNote(wrap, list) {
+  if (!wrap || !Array.isArray(list) || !list.length) return;
+  const note = document.createElement('div');
+  note.className = 'attach-note';
+  note.textContent =
+    list.map((a) => `${a.kind === 'image' ? '🖼' : '📄'} ${a.name}`).join('  ·  ');
+  wrap.appendChild(note);
+}
+
+function appendUser(text, attached) {
+  const files = Array.isArray(attached) ? attached : [];
+  transcript.push({
+    role: 'user',
+    text,
+    ...(files.length
+      ? { attachments: files.map((a) => ({ name: a.name, kind: a.kind })) }
+      : {}),
+  });
   const wrap = appendEl('msg user');
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
   bubble.textContent = text;
   wrap.appendChild(bubble);
+  appendAttachmentNote(wrap, files);
   lastBlock = { type: 'user', wrap };
   schedulePersist();
   scrollToBottom();
@@ -1039,7 +1180,7 @@ async function pageGetPage(args) {
 
 function pageGetDom(args) {
   const selector = args && args.selector;
-  const maxItems = (args && args.max_items) || 100;
+  const maxItems = (args && args.max_items) || 60;
   // Field values are omitted by default (they can contain passwords, tokens,
   // card numbers). The model opts in with include_values: true.
   const includeValues = !!(args && args.include_values);
@@ -1197,12 +1338,15 @@ function ensureAgentRuntime() {
       try {
         const r = rectOf(el);
         const isRight = o.button === 'right';
+        // `at` lets the caller click a precise point (a position read from a
+        // screenshot) instead of the element's centre.
+        const at = o.at && isFinite(o.at.x) && isFinite(o.at.y) ? o.at : null;
         const base = {
           bubbles: true,
           cancelable: true,
           view: window,
-          clientX: r.left + r.width / 2,
-          clientY: r.top + r.height / 2,
+          clientX: at ? at.x : r.left + r.width / 2,
+          clientY: at ? at.y : r.top + r.height / 2,
           button: isRight ? 2 : 0,
           detail: o.double ? 2 : 1,
         };
@@ -2004,6 +2148,60 @@ function pageDeleteElement(args) {
   });
 }
 
+/**
+ * Click at a point of the page, using the coordinates of the last screenshot.
+ * This is the fallback for everything the DOM cannot address: canvas widgets,
+ * images, custom controls and cross-origin frames.
+ */
+function pageClickAt(args) {
+  const a = args || {};
+  const x = Number(a.x);
+  const y = Number(a.y);
+  if (!isFinite(x) || !isFinite(y)) {
+    throw new Error('click_at needs numeric x and y.');
+  }
+  const rt = window.__agentRuntime;
+  const hit = document.elementFromPoint(x, y);
+  if (!hit) {
+    throw new Error(
+      `Nothing is at (${Math.round(x)}, ${Math.round(y)}) — take a fresh screenshot and look again.`
+    );
+  }
+  const el = hit.closest(
+    'a,button,input,textarea,select,[role="button"],[onclick],label,summary,[tabindex]'
+  ) || hit;
+  try {
+    el.scrollIntoView({ block: 'center', behavior: 'auto' });
+  } catch (e) {
+    // scroll is best-effort
+  }
+  if (rt) rt.aim(el);
+  const wait = rt ? rt.wait(450) : Promise.resolve();
+  return wait.then(() => {
+    const r = el.getBoundingClientRect();
+    // Click exactly where the screenshot pointed, not the element's centre.
+    const cx = Math.min(Math.max(x, r.left + 1), r.right - 1);
+    const cy = Math.min(Math.max(y, r.top + 1), r.bottom - 1);
+    if (rt) {
+      rt.highlight(el, '#d97757', 1800);
+      rt.mouse(el, { button: 'left', at: { x: cx, y: cy } });
+      rt.toast('Agent clicked at (' + Math.round(x) + ', ' + Math.round(y) + ')');
+    } else {
+      try {
+        el.click();
+      } catch (e2) {
+        // ignore
+      }
+    }
+    return {
+      clicked: true,
+      at: { x: Math.round(x), y: Math.round(y) },
+      tag: el.tagName.toLowerCase(),
+      text: ((el.innerText || el.textContent) || '').trim().slice(0, 120),
+    };
+  });
+}
+
 const BROWSER_EXECUTORS = {
   get_page: pageGetPage,
   get_dom: pageGetDom,
@@ -2018,6 +2216,7 @@ const BROWSER_EXECUTORS = {
   edit_element: pageEditElement,
   add_element: pageAddElement,
   delete_element: pageDeleteElement,
+  click_at: pageClickAt,
 };
 
 function isRestrictedUrl(url) {
@@ -2045,23 +2244,65 @@ function clearMarkersInPage() {
 
 /** Clean the page up after a run so the host site does not keep our markers. */
 async function clearAgentMarkers() {
+  if (!chrome.scripting) return;
+  const tabIds = new Set(domIndexMaps.keys());
   try {
-    if (!chrome.scripting) return;
     const tab = await getActiveTab();
-    if (!tab || isRestrictedUrl(tab.url)) return;
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: clearMarkersInPage,
-    });
+    if (tab) tabIds.add(tab.id);
   } catch (e) {
-    // The tab may be closed or protected — nothing to clean up then.
+    // no active tab — the known ones are still worth cleaning
   }
+  for (const tabId of tabIds) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        func: clearMarkersInPage,
+      });
+    } catch (e) {
+      // The tab may be closed or protected — nothing to clean up then.
+    }
+  }
+  domIndexMaps.clear();
 }
 
 async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || tab.id == null) throw new Error('No active tab found.');
   return tab;
+}
+
+/**
+ * The tab a tool should act on: the one named by `tab_id`, or the active tab.
+ * This is what lets the agent work on a tab other than the one in front of
+ * the user (the same way Claude in Chrome does).
+ */
+async function resolveTargetTab(args) {
+  const a = args || {};
+  const raw = a.tab_id;
+  if (raw != null && raw !== '' && raw !== 'active') {
+    const id = Number(raw);
+    if (!Number.isNaN(id)) {
+      try {
+        return await chrome.tabs.get(id);
+      } catch (e) {
+        throw new Error(`No open tab with id ${id} — call list_tabs to see the open tabs.`);
+      }
+    }
+  }
+  return getActiveTab();
+}
+
+// Per-tab maps for the element index and the last screenshot scale.
+const domIndexMaps = new Map();      // tabId -> Map(index -> { frameId, localIndex })
+const screenshotScales = new Map();  // tabId -> { cssPerImage, imageWidth, imageHeight, viewportWidth, viewportHeight }
+
+function domIndexMapFor(tabId) {
+  let m = domIndexMaps.get(tabId);
+  if (!m) {
+    m = new Map();
+    domIndexMaps.set(tabId, m);
+  }
+  return m;
 }
 
 function loadImage(src) {
@@ -2073,28 +2314,91 @@ function loadImage(src) {
   });
 }
 
-async function captureScreenshot() {
-  const tab = await getActiveTab();
+/** The page's viewport size in CSS pixels (what elementFromPoint expects). */
+async function getViewportSize(tab) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => ({
+        width: window.innerWidth,
+        height: window.innerHeight,
+        dpr: window.devicePixelRatio || 1,
+      }),
+    });
+    const r = results && results[0] && results[0].result;
+    if (r && r.width) return r;
+  } catch (e) {
+    // fall through to the image size
+  }
+  return null;
+}
+
+/** Bring a tab to the front of its window so it can be captured. */
+async function activateTab(tab, options) {
+  const opts = options || {};
+  try {
+    await chrome.tabs.update(tab.id, { active: true });
+  } catch (e) {
+    // The tab may be gone — the capture will report the real problem.
+  }
+  // Only steal the window focus when the user is meant to watch the work.
+  if (opts.focus && tab.windowId != null) {
+    try {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    } catch (e) {
+      // Focusing the window can be refused; not fatal.
+    }
+  }
+  await new Promise((r) => setTimeout(r, 250));
+}
+
+async function captureScreenshot(args, options) {
+  const opts = options || {};
+  const tab = await resolveTargetTab(args);
   if (isRestrictedUrl(tab.url)) {
     throw new Error(
-      `Cannot capture the active tab (${tab.url || tab.id}) — it's a protected page.`
+      `Cannot capture the tab (${tab.url || tab.id}) — it's a protected page.`
     );
   }
+  // Only the visible tab of a window can be captured, so bring it forward.
+  if (!tab.active) await activateTab(tab);
   const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
     format: 'jpeg',
     quality: 60,
   });
   // Downscale so the image is small enough to keep and display quickly.
   const img = await loadImage(dataUrl);
-  const maxW = 900;
+  const maxW = 1280;
   const scale = Math.min(1, maxW / (img.naturalWidth || maxW));
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
   canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
   canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
   const out = canvas.toDataURL('image/jpeg', 0.7);
-  appendScreenshot(out);
-  return { captured: true, width: canvas.width, height: canvas.height, image: out };
+  if (opts.show !== false) appendScreenshot(out);
+
+  // The model works in image pixels; remember how they map to page (CSS)
+  // pixels so click_at can turn a position from the screenshot into a click.
+  const viewport = await getViewportSize(tab);
+  const cssWidth = (viewport && viewport.width) || canvas.width;
+  const cssHeight = (viewport && viewport.height) || canvas.height;
+  const cssPerImage = canvas.width / (cssWidth || canvas.width);
+  screenshotScales.set(tab.id, {
+    cssPerImage,
+    imageWidth: canvas.width,
+    imageHeight: canvas.height,
+    viewportWidth: cssWidth,
+    viewportHeight: cssHeight,
+  });
+  return {
+    captured: true,
+    width: canvas.width,
+    height: canvas.height,
+    viewport: { width: cssWidth, height: cssHeight },
+    scale: cssPerImage,
+    tabId: tab.id,
+    image: out,
+  };
 }
 
 function normalizeUrl(rawUrl) {
@@ -2149,7 +2453,7 @@ async function waitForTabComplete(tabId, ms) {
 
 async function navigateTab(args) {
   const url = normalizeUrl(args && args.url);
-  const tab = await getActiveTab();
+  const tab = await resolveTargetTab(args);
   await chrome.tabs.update(tab.id, { url });
   // Best-effort wait for the page to finish loading so a following get_page reads real content.
   const deadline = Date.now() + 10000;
@@ -2162,21 +2466,21 @@ async function navigateTab(args) {
     }
     await new Promise((r) => setTimeout(r, 300));
   }
-  return { navigatedTo: url };
+  return { navigatedTo: url, tabId: tab.id };
 }
 
 async function searchWeb(args) {
   const q = String((args && args.query) || '').trim();
   if (!q) throw new Error('search requires a query.');
   const engine = searchEngineFor(settings.searchProvider);
-  const tab = await getActiveTab();
+  const tab = await resolveTargetTab(args);
   const host = hostnameOf(tab.url);
   // Typing into the page's own search box keeps the user in the flow — but
   // only on the matching engine (a Google page search makes no sense when the
   // user picked Bing).
   if (!isRestrictedUrl(tab.url) && host === engine.host) {
     try {
-      const r = await executeBrowserTool('search_on_page', { query: q });
+      const r = await executeBrowserTool('search_on_page', { query: q, tab_id: tab.id });
       if (r && r.submitted) {
         const changed = await waitForUrlChange(tab.id, 3500);
         if (changed) {
@@ -2188,21 +2492,176 @@ async function searchWeb(args) {
       // no search field or submit did not navigate — fall back to a plain URL search
     }
   }
-  return navigateTab({ url: engine.url(q), provider: engine.label });
+  return navigateTab({ url: engine.url(q), tab_id: tab.id });
+}
+
+// ---------------- tab control ----------------
+
+/** Every open tab, so the agent can pick the one a task is about. */
+async function listTabs() {
+  const tabs = await chrome.tabs.query({});
+  return {
+    count: tabs.length,
+    tabs: tabs.map((t) => ({
+      id: t.id,
+      title: (t.title || '').trim().slice(0, 140),
+      url: t.url || '',
+      windowId: t.windowId,
+      active: !!t.active,
+      status: t.status,
+    })),
+    hint: 'Use the tab id with the other tools (tab_id) to work on a specific tab.',
+  };
+}
+
+/** Bring a tab to the front so the user sees the work. */
+async function switchTab(args) {
+  const tab = await resolveTargetTab(args);
+  await activateTab(tab, { focus: true });
+  return {
+    switchedTo: { id: tab.id, title: tab.title, url: tab.url },
+    hint: 'The tab is now active — the next action lands there.',
+  };
+}
+
+/** Open a page in a new tab without disturbing the current one. */
+async function openTab(args) {
+  const url = normalizeUrl(args && args.url);
+  const active = !(args && args.active === false);
+  const tab = await chrome.tabs.create({ url, active });
+  await waitForTabComplete(tab.id, 10000);
+  return { opened: tab.id, url, active };
+}
+
+/** Close a tab (the agent cleans up the tabs it opened). */
+async function closeTab(args) {
+  const tab = await resolveTargetTab(args);
+  await chrome.tabs.remove(tab.id);
+  screenshotScales.delete(tab.id);
+  domIndexMaps.delete(tab.id);
+  return { closed: tab.id, url: tab.url || '' };
+}
+
+/** Inject a function into the top frame of a tab. */
+async function injectIntoTab(tab, func, args, frameIds) {
+  const target = frameIds && frameIds.length ? { tabId: tab.id, frameIds } : { tabId: tab.id };
+  return chrome.scripting.executeScript({ target, func, args: [args || {}] });
+}
+
+/**
+ * Inject into every frame of the tab. Some frames (sandboxed, chrome://,
+ * cross-origin extensions) refuse injection and make the whole call fail, so
+ * the top frame is used as a fallback.
+ */
+async function injectIntoAllFrames(tab, func, args) {
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true },
+      func,
+      args: [args || {}],
+    });
+    if (results && results.length) return results;
+  } catch (e) {
+    // fall through to the top frame
+  }
+  return injectIntoTab(tab, func, args);
+}
+
+/** Make sure the agent runtime (toast, highlight, mouse) exists in the tab. */
+async function ensureRuntime(tab, allFrames) {
+  if (allFrames) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        func: ensureAgentRuntime,
+      });
+      return;
+    } catch (e) {
+      // One frame refused injection — the top frame still gets the runtime.
+    }
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: ensureAgentRuntime,
+    });
+  } catch (e) {
+    // A protected page or a closed tab — the tool itself will report it.
+  }
+}
+
+/**
+ * Merge the per-frame DOM snapshots into one numbered list. Indices are
+ * global (so the model sees one numbering) while the extension remembers
+ * which frame each index lives in.
+ */
+function mergeDomResults(results, tab, args) {
+  const map = domIndexMapFor(tab.id);
+  map.clear();
+  const elements = [];
+  const frames = [];
+  const maxItems = (args && args.max_items) || 60;
+  let offset = 0;
+  let top = null;
+
+  for (const r of results || []) {
+    const data = r && r.result;
+    if (!data || !Array.isArray(data.elements)) continue;
+    const frameId = r.frameId == null ? 0 : r.frameId;
+    if (frameId === 0 || !top) top = data;
+    frames.push({
+      frameId,
+      url: data.url || '',
+      elements: data.elements.length,
+    });
+    for (const el of data.elements) {
+      if (elements.length >= maxItems) break;
+      const global = offset + el.index;
+      map.set(global, { frameId, localIndex: el.index });
+      elements.push(Object.assign({}, el, { index: global, frame: frameId }));
+    }
+    offset += data.elements.length;
+    if (elements.length >= maxItems) break;
+  }
+
+  return {
+    url: (top && top.url) || '',
+    title: (top && top.title) || '',
+    count: elements.length,
+    elements,
+    frames,
+    hint:
+      'Each element has a stable index — pass it as "index" to click/type/edit_element/delete_element. ' +
+      'Elements inside frames are included too (the "frame" field says which). ' +
+      'Field values are hidden by default — re-run with include_values: true to see them.',
+  };
 }
 
 async function executeBrowserTool(name, args) {
+  const a = args || {};
   if (name === 'screenshot') {
-    return captureScreenshot();
+    return captureScreenshot(a);
   }
   if (name === 'navigate') {
-    return navigateTab(args);
+    return navigateTab(a);
   }
   if (name === 'search') {
-    return searchWeb(args);
+    return searchWeb(a);
   }
   if (name === 'find_best_link') {
-    return findBestLink(args);
+    return findBestLink(a);
+  }
+  if (name === 'list_tabs') {
+    return listTabs(a);
+  }
+  if (name === 'switch_tab') {
+    return switchTab(a);
+  }
+  if (name === 'open_tab') {
+    return openTab(a);
+  }
+  if (name === 'close_tab') {
+    return closeTab(a);
   }
   if (!chrome.scripting) {
     throw new Error(
@@ -2211,49 +2670,61 @@ async function executeBrowserTool(name, args) {
   }
   const fn = BROWSER_EXECUTORS[name];
   if (!fn) throw new Error('Unknown browser tool: ' + name);
-  const tab = await getActiveTab();
+  const tab = await resolveTargetTab(a);
   if (isRestrictedUrl(tab.url)) {
     throw new Error(
-      `Cannot read the active tab (${tab.url || tab.id}). Chrome blocks extensions from reading chrome://, Web Store, and other protected pages. Switch to a normal web page and try again.`
+      `Cannot read the tab (${tab.url || tab.id}). Chrome blocks extensions from reading chrome://, Web Store, and other protected pages. Switch to a normal web page and try again.`
     );
   }
+
+  // An index from a get_dom snapshot may live in a frame — resolve it to the
+  // frame and the local index before injecting.
+  let frameIds = null;
+  let pageArgs = a;
+  if (a.index != null && a.index !== '') {
+    const entry = domIndexMapFor(tab.id).get(Number(a.index));
+    if (!entry) {
+      throw new Error(
+        `Element #${a.index} is stale — call get_dom again to refresh element numbers.`
+      );
+    }
+    frameIds = entry.frameId ? [entry.frameId] : null;
+    pageArgs = Object.assign({}, a, { index: entry.localIndex });
+  }
+
+  // click_at works in the coordinates of the last screenshot; convert them to
+  // page (CSS) pixels before injecting.
+  if (name === 'click_at') {
+    const shot = screenshotScales.get(tab.id);
+    const x = Number(a.x);
+    const y = Number(a.y);
+    if (!isFinite(x) || !isFinite(y)) {
+      throw new Error('click_at needs numeric x and y from the screenshot.');
+    }
+    const factor = shot && shot.cssPerImage ? shot.cssPerImage : 1;
+    pageArgs = Object.assign({}, a, {
+      x: x * factor,
+      y: y * factor,
+      scale: factor,
+    });
+  }
+
   let results;
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: ensureAgentRuntime,
-    });
-    results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: fn,
-      args: [args || {}],
-    });
+    await ensureRuntime(tab, name === 'get_dom' || !!frameIds);
+    if (name === 'get_dom') {
+      results = await injectIntoAllFrames(tab, fn, pageArgs);
+      return mergeDomResults(results, tab, pageArgs);
+    }
+    results = await injectIntoTab(tab, fn, pageArgs, frameIds);
   } catch (e) {
-    throw new Error(`Could not run ${name} on the active tab: ${(e && e.message) || e}`);
+    throw new Error(`Could not run ${name} on the tab: ${(e && e.message) || e}`);
   }
   const first = results && results[0];
   let value = first && first.result;
   if (value && typeof value.then === 'function') value = await value;
   if (value !== undefined) return value;
   throw new Error(`No result from ${name}`);
-}
-
-async function executeBrowserToolWithRetry(name, args, maxRetries) {
-  let lastError = null;
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      return await executeBrowserTool(name, args);
-    } catch (e) {
-      lastError = e;
-      if (i < maxRetries - 1) {
-        // Brief wait before retry
-        const waitTime = 200 * Math.pow(1.5, i);
-        appendStatus(`⏳ Retrying ${name} in ${waitTime}ms...`);
-        await new Promise((r) => setTimeout(r, waitTime));
-      }
-    }
-  }
-  throw lastError;
 }
 
 function browserToolStatus(name, args) {
@@ -2295,8 +2766,50 @@ function browserToolStatus(name, args) {
       return '🌐 Adding content to ' + (a.selector || 'the page');
     case 'delete_element':
       return '🌐 Removing ' + (a.selector || a.match || 'page element');
+    case 'click_at':
+      return `🌐 Clicking at (${Math.round(Number(a.x) || 0)}, ${Math.round(Number(a.y) || 0)})`;
+    case 'list_tabs':
+      return '🗂 Listing the open tabs…';
+    case 'switch_tab':
+      return '🗂 Switching to the tab…';
+    case 'open_tab':
+      return '🗂 Opening ' + String(a.url || '').slice(0, 80);
+    case 'close_tab':
+      return '🗂 Closing the tab…';
     default:
       return '🌐 ' + name + ' on active tab';
+  }
+}
+
+// Tools that change the page — after them the model gets a fresh look.
+const MUTATING_TOOLS = new Set([
+  'click',
+  'click_at',
+  'type',
+  'key',
+  'edit_element',
+  'add_element',
+  'delete_element',
+  'navigate',
+  'search',
+]);
+
+/**
+ * Give the model a picture of the page after every change, so it can check
+ * its own work instead of guessing. Only for models that can see images.
+ */
+async function maybeAttachScreenshot(name, result, args) {
+  if (!result || typeof result !== 'object') return result;
+  if (result.image) return result;
+  if (settings.verifyWithScreenshot === false) return result;
+  if (!sessionVision) return result;
+  if (!MUTATING_TOOLS.has(name)) return result;
+  try {
+    const shot = await captureScreenshot({ tab_id: args && args.tab_id }, { show: false });
+    return Object.assign({}, result, { image: shot.image });
+  } catch (e) {
+    // A protected page or a closed tab — the action result still stands.
+    return result;
   }
 }
 
@@ -2306,10 +2819,11 @@ async function handleBrowserRequest(payload) {
   appendStatus(browserToolStatus(name, args));
   try {
     const result = await executeBrowserTool(name, args);
+    const enriched = await maybeAttachScreenshot(name, result, args);
     await fetch(`${base}/browser/result`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, result }),
+      body: JSON.stringify({ id, result: enriched }),
     });
   } catch (e) {
     const msg = String((e && e.message) || e);
@@ -2351,6 +2865,7 @@ function handleEvent(event, data) {
         settings.sessionId = payload.sessionId;
         saveSettings();
       }
+      sessionVision = !!payload.vision;
       break;
     case 'scope': {
       const chip = $('scopeChip');
@@ -2528,12 +3043,15 @@ async function sendMessage(overrideText, options) {
   const opts = options || {};
   const isRegen = typeof overrideText === 'string';
   const text = isRegen ? overrideText : inputEl.value.trim();
-  if (!text || streaming) return;
+  if (!text && !attachments.length) return;
+  if (streaming) return;
+  const sent = attachments.slice();
   if (!isRegen) {
     inputEl.value = '';
     autoGrow();
-    appendUser(text);
+    appendUser(text, sent);
   }
+  clearAttachments();
   beginRun();
   const ac = new AbortController();
   activeController = ac;
@@ -2600,7 +3118,11 @@ async function sendMessage(overrideText, options) {
   // work — and it flooded the server's scope routing with page text, so a
   // page containing the word "latest" turned an edit into a research task.
   const userPrompt = trimAll(text);
-  let request = userPrompt || 'analyze this webpage and provide insights';
+  let request =
+    userPrompt ||
+    (sent.length
+      ? 'Read the attached file(s) and tell me what they say.'
+      : 'analyze this webpage and provide insights');
 
   // Auto-prompt adds the instruction that matches the request. Searching
   // Google with it is opt-in (autoSearchOnSend) — by default the model decides
@@ -2626,9 +3148,18 @@ async function sendMessage(overrideText, options) {
   const ambiguity = pageAmbiguityNote(userPrompt);
   if (ambiguity) request += '\n\n' + ambiguity;
 
-  // Compose the message: live-page frame (when there is one) + the request.
-  // With auto-prompt off the user's words are sent untouched.
-  let outMessage = settings.autoPrompt && pageFrame ? pageFrame + '\n\n' + request : request;
+  // Compose the message: live-page frame (when there is one) + the attached
+  // documents + the request. The request goes last so a small model reads it
+  // as the instruction.
+  const parts = [];
+  if (settings.autoPrompt && pageFrame) parts.push(pageFrame);
+  for (const item of sent) {
+    if (item.kind === 'text' && item.text) {
+      parts.push(`[Attached document: ${item.name}]\n${item.text}`);
+    }
+  }
+  parts.push(request);
+  let outMessage = parts.join('\n\n');
 
   // Auto-search only fires for research/current-info prompts (see
   // shouldAutoSearch); everything else is left to the model, which runs its
@@ -2653,7 +3184,12 @@ async function sendMessage(overrideText, options) {
     // The user's own words, without the page frame or the instructions. The
     // server routes the request (page vs. research) on this, so it must not
     // contain page text.
-    userRequest: userPrompt,
+    userRequest: userPrompt || 'describe the attached document',
+    // Attached documents (already read into text) and pictures.
+    attachments: sent
+      .filter((a) => a.kind === 'text' && a.text)
+      .map((a) => ({ name: a.name, text: a.text })),
+    images: sent.filter((a) => a.kind === 'image' && a.dataUrl).map((a) => a.dataUrl),
     model: settings.model || undefined,
     provider: settings.provider || undefined,
     autoApprove: settings.autoApprove,
@@ -3215,6 +3751,7 @@ function clearHistory() {
   messagesEl.innerHTML = '';
   lastBlock = null;
   hideApproval();
+  clearAttachments();
   saveSettings();
   chrome.storage.local.set({ transcript: [] });
   setResponseTime(0);
@@ -3305,6 +3842,31 @@ function autoGrow() {
 }
 
 // ---------------- wiring ----------------
+// ---------------- right-click requests ----------------
+/**
+ * The right-click entries ("Ask the agent about …") park the request in
+ * session storage; the panel picks it up when it opens.
+ */
+async function takePendingAsk() {
+  try {
+    if (!chrome.storage || !chrome.storage.session) return;
+    const data = await chrome.storage.session.get('pendingAsk');
+    const ask = data && data.pendingAsk;
+    if (!ask || !ask.at) return;
+    await chrome.storage.session.remove('pendingAsk');
+    if (ask.text) {
+      inputEl.value = ask.text;
+      autoGrow();
+      inputEl.focus();
+      appendStatus('📋 Picked up your selection from the page.');
+    } else {
+      appendStatus('📋 Ready to work on this page — type what you need.');
+    }
+  } catch (e) {
+    // Session storage is not available — the user can still type normally.
+  }
+}
+
 function init() {
   // Check voice recognition support
   checkVoiceSupport();
@@ -3324,10 +3886,34 @@ function init() {
   if (micBtn) {
     micBtn.addEventListener('click', startListening);
   }
+  const attachBtn = $('attachBtn');
+  const fileInput = $('fileInput');
+  if (attachBtn && fileInput) {
+    attachBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async () => {
+      await handlePickedFiles(fileInput.files);
+      fileInput.value = ''; // the same file can be picked again
+    });
+  }
   inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
+    }
+  });
+  // Pasting a picture straight into the composer attaches it too.
+  inputEl.addEventListener('paste', async (e) => {
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    const files = [];
+    for (const item of items) {
+      if (item.kind === 'file') {
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+    if (files.length) {
+      e.preventDefault();
+      await handlePickedFiles(files);
     }
   });
   inputEl.addEventListener('input', autoGrow);
@@ -3480,6 +4066,12 @@ function init() {
       saveSettings();
     });
   }
+  if ($('verifyShot')) {
+    $('verifyShot').addEventListener('change', (e) => {
+      settings.verifyWithScreenshot = e.target.checked;
+      saveSettings();
+    });
+  }
   $('refreshModels').addEventListener('click', loadModels);
   $('approveBtn').addEventListener('click', () => respondApproval(true, 'once'));
   $('sessionBtn').addEventListener('click', () => respondApproval(true, 'session'));
@@ -3506,6 +4098,7 @@ function init() {
     if (settings.projectRoot) applyProject(settings.projectRoot);
     else refreshProjectStatus();
     checkHealth();
+    takePendingAsk();
   });
 }
 

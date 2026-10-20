@@ -564,6 +564,11 @@ const BROWSER_TOOLS = new Set([
   'edit_element',
   'add_element',
   'delete_element',
+  'list_tabs',
+  'switch_tab',
+  'open_tab',
+  'close_tab',
+  'click_at',
 ]);
 
 async function execute(name, args) {
@@ -807,8 +812,9 @@ const TOOL_DEFINITIONS = [
       parameters: {
         type: 'object',
         properties: {
-          max_chars: { type: 'integer', description: 'Maximum characters of page text to return (default 15000).' },
+          max_chars: { type: 'integer', description: 'Maximum characters of page text to return (default 8000).' },
           max_scrolls: { type: 'integer', description: 'Maximum number of scroll steps (default 20).' },
+          tab_id: { type: 'integer', description: 'Optional tab id (default: the active tab).' },
         },
       },
     },
@@ -818,12 +824,13 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'get_dom',
       description:
-        'List elements on the active tab (links, buttons, fields, headings, paragraphs, list items, images) as a numbered snapshot. Every element has a stable `index` and a generated CSS `selector` — pass the index to click/type/edit_element/delete_element for the most reliable targeting.',
+        'List elements on the active tab (links, buttons, fields, headings, paragraphs, list items, images) as a numbered snapshot. Every element has a stable `index` and a generated CSS `selector` — pass the index to click/type/edit_element/delete_element for the most reliable targeting. Use max_items to keep the list short (default 60).',
       parameters: {
         type: 'object',
         properties: {
           selector: { type: 'string', description: 'Optional CSS selector to scope the search (default: all interactive elements).' },
-          max_items: { type: 'integer', description: 'Maximum number of elements to return (default 100).' },
+          max_items: { type: 'integer', description: 'Maximum number of elements to return (default 60).' },
+          tab_id: { type: 'integer', description: 'Optional tab id (default: the active tab).' },
         },
       },
     },
@@ -845,6 +852,7 @@ const TOOL_DEFINITIONS = [
             enum: ['left', 'double', 'right'],
             description: 'Which mouse button / click type (default left).',
           },
+          tab_id: { type: 'integer', description: 'Optional tab id (default: the active tab).' },
         },
       },
     },
@@ -863,6 +871,7 @@ const TOOL_DEFINITIONS = [
           text: { type: 'string', description: 'Placeholder, name, or aria-label of the field to find.' },
           value: { type: 'string', description: 'The text to type into the field.' },
           press_enter: { type: 'boolean', description: 'Press Enter after typing (default false).' },
+          tab_id: { type: 'integer', description: 'Optional tab id (default: the active tab).' },
         },
         required: ['value'],
       },
@@ -881,6 +890,7 @@ const TOOL_DEFINITIONS = [
           index: { type: 'integer', description: 'Element number from the latest get_dom snapshot to focus first (preferred).' },
           selector: { type: 'string', description: 'CSS selector of the element to focus first, e.g. "#search".' },
           text: { type: 'string', description: 'Visible text of the element to focus first.' },
+          tab_id: { type: 'integer', description: 'Optional tab id (default: the active tab).' },
         },
         required: ['keys'],
       },
@@ -903,6 +913,7 @@ const TOOL_DEFINITIONS = [
           value: { type: 'string', description: 'New value for an input/textarea/select field.' },
           attribute: { type: 'string', description: 'Attribute name to set, e.g. "class", "href", "src".' },
           attribute_value: { type: 'string', description: 'Value for the attribute.' },
+          tab_id: { type: 'integer', description: 'Optional tab id (default: the active tab).' },
         },
       },
     },
@@ -921,6 +932,7 @@ const TOOL_DEFINITIONS = [
           selector: { type: 'string', description: 'Target element CSS selector (default: body).' },
           index: { type: 'integer', description: 'Target element number from the latest get_dom snapshot (preferred over selector).' },
           position: { type: 'string', enum: ['append', 'prepend', 'before', 'after'], description: 'Where to insert relative to the target (default append).' },
+          tab_id: { type: 'integer', description: 'Optional tab id (default: the active tab).' },
         },
       },
     },
@@ -937,6 +949,7 @@ const TOOL_DEFINITIONS = [
           index: { type: 'integer', description: 'Element number from the latest get_dom snapshot (preferred).' },
           selector: { type: 'string', description: 'CSS selector of the element to remove.' },
           match: { type: 'string', description: 'Visible text to locate the element instead of a selector.' },
+          tab_id: { type: 'integer', description: 'Optional tab id (default: the active tab).' },
         },
       },
     },
@@ -953,6 +966,7 @@ const TOOL_DEFINITIONS = [
           direction: { type: 'string', enum: ['down', 'up'], description: 'Direction to scroll (default down).' },
           amount: { type: 'integer', description: 'Pixels to scroll (default ~80% of the viewport).' },
           selector: { type: 'string', description: 'Optional CSS selector of an element to scroll into view.' },
+          tab_id: { type: 'integer', description: 'Optional tab id (default: the active tab).' },
         },
       },
     },
@@ -962,10 +976,12 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'screenshot',
       description:
-        'Capture a screenshot of the active browser tab. With a vision-capable model the image is returned to you so you can see the page and verify your work visually after clicking, typing, or editing.',
+        'Capture a screenshot of a browser tab. With a vision-capable model the image is returned to you so you can see the page and verify your work visually after clicking, typing, or editing. The image shows the visible viewport, so the pixel positions in it can be handed to click_at.',
       parameters: {
         type: 'object',
-        properties: {},
+        properties: {
+          tab_id: { type: 'integer', description: 'Optional tab id (default: the active tab). It is brought to the front first.' },
+        },
       },
     },
   },
@@ -974,12 +990,13 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'navigate',
       description:
-        'Open a URL in the active browser tab. Use this to visit a page or search engine when you need information you do not already have. Requires Chrome extension popup to be open.',
+        'Open a URL in a browser tab. Use this to visit a page or search engine when you need information you do not already have. Requires Chrome extension popup to be open.',
       parameters: {
         type: 'object',
         properties: {
           url: { type: 'string', description: 'Full URL to open, e.g. "https://www.google.com/search?q=upwork" or "https://en.wikipedia.org/wiki/X".' },
           timeout: { type: 'integer', description: 'Optional timeout in milliseconds (default 30000, max 120000).', minimum: 5000, maximum: 120000 },
+          tab_id: { type: 'integer', description: 'Optional tab id (default: the active tab).' },
         },
         required: ['url'],
       },
@@ -995,8 +1012,84 @@ const TOOL_DEFINITIONS = [
         type: 'object',
         properties: {
           query: { type: 'string', description: 'The search query.' },
+          tab_id: { type: 'integer', description: 'Optional tab to search in (default: the active tab).' },
         },
         required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_tabs',
+      description:
+        'List every open browser tab (id, title, url, window, whether it is active). Use it to find the tab a task is about — the email you have to forward, the order you are checking, the page behind a login — and then act on that tab with `tab_id`.',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'switch_tab',
+      description:
+        'Make a tab the active tab and focus its window, so the user sees it and the next action lands there. Use it before working on a tab you found with list_tabs.',
+      parameters: {
+        type: 'object',
+        properties: {
+          tab_id: { type: 'integer', description: 'The tab id from list_tabs.' },
+        },
+        required: ['tab_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'open_tab',
+      description:
+        'Open a URL in a new tab. Use it for a page you need but do not want to replace the page the user is on (a search result, a login page, a document to read).',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Full URL to open, e.g. "https://example.com/docs".' },
+          active: { type: 'boolean', description: 'Focus the new tab (default true).' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'close_tab',
+      description:
+        'Close a tab. Use it to clean up the tabs you opened once the task is done — never close a tab the user had open before you started.',
+      parameters: {
+        type: 'object',
+        properties: {
+          tab_id: { type: 'integer', description: 'The tab id from list_tabs or open_tab.' },
+        },
+        required: ['tab_id'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'click_at',
+      description:
+        'Click at a point of the page, using the pixel coordinates you read from a screenshot (x from the left, y from the top of the image). Use it when the target has no usable DOM handle: canvas widgets, images, custom controls, or anything inside a frame you cannot address by index. Take a screenshot first — the coordinates are the ones you see in that image.',
+      parameters: {
+        type: 'object',
+        properties: {
+          x: { type: 'integer', description: 'X coordinate, 0 = left edge of the viewport.' },
+          y: { type: 'integer', description: 'Y coordinate, 0 = top edge of the viewport.' },
+          tab_id: { type: 'integer', description: 'Optional tab id (default: the active tab).' },
+        },
+        required: ['x', 'y'],
       },
     },
   },

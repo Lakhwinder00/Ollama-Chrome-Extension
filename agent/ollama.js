@@ -28,11 +28,16 @@ function prepareMessages(messages) {
   if (!out.some((m) => m.role === 'user')) {
     out.push({ role: 'user', content: 'Continue from the results above and answer the original request.' });
   }
-  // Preserve images in messages for vision models
+  // Preserve images in messages for vision models (Ollama wants the raw
+  // base64 payload, not a data URL).
   return out.map(m => {
     const msg = { role: m.role, content: m.content };
     if (Array.isArray(m.images) && m.images.length > 0) {
-      msg.images = m.images;
+      msg.images = m.images.map((img) => {
+        const s = String(img);
+        const i = s.indexOf('base64,');
+        return i === -1 ? s : s.slice(i + 7);
+      });
     }
     if (m.tool_calls) msg.tool_calls = m.tool_calls;
     if (m.tool_call_id) msg.tool_call_id = m.tool_call_id;
