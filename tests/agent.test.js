@@ -9,7 +9,7 @@ const assert = require('node:assert/strict');
 
 const {
   DANGEROUS_TOOLS,
-  MAX_ITERATIONS,
+  MAX_STAGNANT_STEPS,
   convertToolCallObject,
   parseToolCallsFromContent,
   normalizeToolCalls,
@@ -23,6 +23,10 @@ const {
 } = require('../agent/agent');
 const { webSearch } = require('../agent/web');
 
+// The loop runs until the model answers; it wraps up after this many straight
+// steps without any new tool output (only blocked repeats).
+const LOOP_CALLS = 2 + MAX_STAGNANT_STEPS;
+
 test('dangerous tools require approval (incl. git_commit/git_checkout)', () => {
   for (const t of ['write_file', 'edit_file', 'delete_file', 'run_command', 'git_commit', 'git_checkout']) {
     assert.ok(DANGEROUS_TOOLS.has(t), `${t} should be dangerous`);
@@ -32,12 +36,14 @@ test('dangerous tools require approval (incl. git_commit/git_checkout)', () => {
   }
 });
 
-test('browser tools that change the page require approval, read-only ones do not', () => {
-  for (const t of ['click', 'type', 'edit_element', 'add_element', 'delete_element']) {
-    assert.ok(DANGEROUS_TOOLS.has(t), `${t} should be dangerous`);
+test('browser tools that change the page need no approval, file/shell tools do', () => {
+  // Browser changes run without approval: every change is shown live in the
+  // user's tab and the run can always be stopped (README → Safety built in).
+  for (const t of ['click', 'type', 'edit_element', 'add_element', 'delete_element', 'navigate']) {
+    assert.ok(!DANGEROUS_TOOLS.has(t), `${t} must not require approval`);
   }
-  for (const t of ['get_page', 'get_dom', 'scroll', 'screenshot', 'navigate', 'search']) {
-    assert.ok(!DANGEROUS_TOOLS.has(t), `${t} should be read-only`);
+  for (const t of ['get_page', 'get_dom', 'scroll', 'screenshot', 'search']) {
+    assert.ok(!DANGEROUS_TOOLS.has(t), `${t} must not require approval`);
   }
 });
 
@@ -346,7 +352,7 @@ test('screenshot images go back to vision models and are stripped for text-only 
   assert.ok(!blindTool.content.includes('base64,'), 'history must not contain the raw data URL');
 });
 
-test('a model that keeps searching is forced to answer from what it gathered', async () => {
+test('a model that keeps searching answers on its own — no dead end', async () => {
   let calls = 0;
   const provider = {
     name: 'mock',
@@ -377,12 +383,55 @@ test('a model that keeps searching is forced to answer from what it gathered', a
     requestBrowser: async () => ({ navigatedTo: 'https://www.google.com/search?q=local+llm' }),
     onEvent: (e) => events.push(e),
   });
-  assert.equal(calls, 6, 'five searches, then one forced synthesis call');
+  assert.equal(calls, 6, 'five searches, then the model answers');
   assert.match(result.content, /llama\.cpp/);
-  assert.ok(events.some((e) => e.type === 'status' && /final answer/i.test(e.message || '')));
   assert.ok(
     !events.some((e) => e.type === 'status' && /maximum steps/i.test(e.message || '')),
-    'the user must never see "maximum steps reached" after successful synthesis'
+    'the user must never see "maximum steps reached"'
+  );
+});
+
+test('a model stuck on the same action is forced to answer from what it gathered', async () => {
+  let calls = 0;
+  const provider = {
+    name: 'mock',
+    chatStream: async () => {
+      calls++;
+      if (calls <= LOOP_CALLS) {
+        // The same call over and over: after two runs it is blocked as a
+        // repeat, so the run stops making progress and must wrap up.
+        return {
+          message: {
+            content: '',
+            tool_calls: [{ function: { name: 'list_directory', arguments: {} } }],
+          },
+          streamedContent: false,
+        };
+      }
+      return {
+        message: {
+          content: 'Best local LLMs: llama.cpp and Ollama both run on CPU.',
+        },
+        streamedContent: false,
+      };
+    },
+  };
+  const events = [];
+  const result = await runAgent({
+    model: 'mock',
+    messages: [{ role: 'user', content: 'what is the best local LLM?' }],
+    provider,
+    onEvent: (e) => events.push(e),
+  });
+  assert.equal(calls, LOOP_CALLS + 1, 'the loop, then one synthesis call');
+  assert.match(result.content, /llama\.cpp/);
+  assert.ok(
+    events.some((e) => e.type === 'status' && /final answer/i.test(e.message || '')),
+    'the synthesis must be announced'
+  );
+  assert.ok(
+    !events.some((e) => e.type === 'status' && /maximum steps/i.test(e.message || '')),
+    'the user must never see "maximum steps reached"'
   );
 });
 
@@ -392,16 +441,16 @@ test('a JSON-only synthesis is retried with the strict plain-text prompt', async
     name: 'mock',
     chatStream: async () => {
       calls++;
-      if (calls <= 5) {
+      if (calls <= LOOP_CALLS) {
         return {
           message: {
             content: '',
-            tool_calls: [{ function: { name: 'search', arguments: JSON.stringify({ query: 'ollama ' + calls }) } }],
+            tool_calls: [{ function: { name: 'list_directory', arguments: {} } }],
           },
           streamedContent: false,
         };
       }
-      if (calls === 6) return { message: { content: '{"answer":"use qwen"}' }, streamedContent: false };
+      if (calls === LOOP_CALLS + 1) return { message: { content: '{"answer":"use qwen"}' }, streamedContent: false };
       return { message: { content: 'Best pick: qwen2.5-coder for code, llama for chat.' }, streamedContent: false };
     },
   };
@@ -409,25 +458,23 @@ test('a JSON-only synthesis is retried with the strict plain-text prompt', async
     model: 'mock',
     messages: [{ role: 'user', content: 'which local model should I use?' }],
     provider,
-    requestBrowser: async () => ({ navigatedTo: 'https://www.google.com/search?q=ollama' }),
   });
-  assert.equal(calls, 7, 'the JSON reply must trigger exactly one stricter retry');
+  assert.equal(calls, LOOP_CALLS + 2, 'the JSON reply must trigger exactly one stricter retry');
   assert.match(result.content, /qwen2\.5-coder/);
 });
 
-test('running out of steps returns a real progress summary, not a dead end', async () => {
+test('a run that makes no progress ends with a real summary, not a dead end', async () => {
   const originalFetch = global.fetch;
   global.fetch = async () => {
     throw new Error('no network in tests');
   };
   try {
-    const events = [];
     let calls = 0;
     const provider = {
       name: 'mock',
       chatStream: async () => {
         calls++;
-        if (calls <= MAX_ITERATIONS) {
+        if (calls <= LOOP_CALLS) {
           return {
             message: {
               content: '',
@@ -437,9 +484,10 @@ test('running out of steps returns a real progress summary, not a dead end', asy
           };
         }
         // Every synthesis attempt answers with JSON only.
-        return { message: { content: '{"tool_calls":[]}' }, streamedContent: false };
+        return { message: { content: '{"bad json}' }, streamedContent: false };
       },
     };
+    const events = [];
     const result = await runAgent({
       model: 'mock',
       messages: [{ role: 'user', content: 'Update my profile headline' }],
@@ -448,14 +496,13 @@ test('running out of steps returns a real progress summary, not a dead end', asy
       onEvent: (e) => events.push(e),
     });
 
-    assert.equal(calls, MAX_ITERATIONS + 2, 'all steps + 2 synthesis attempts');
+    assert.equal(calls, LOOP_CALLS + 2, 'the loop and the two synthesis attempts');
     assert.doesNotMatch(result.content, /maximum number of steps without finishing/);
     assert.doesNotMatch(result.content, /maximum steps reached/);
-    assert.match(result.content, /ran out of steps/i);
     assert.match(result.content, /list_directory/);
     assert.match(result.content, /continue/i);
     assert.ok(
-      events.some((e) => e.type === 'status' && /Step limit reached/i.test(e.message || '')),
+      events.some((e) => e.type === 'status' && /no new progress/i.test(e.message || '')),
       'the user must be told why the run stopped'
     );
   } finally {
@@ -463,7 +510,7 @@ test('running out of steps returns a real progress summary, not a dead end', asy
   }
 });
 
-test('a question that runs out of steps still gets a researched final answer', async () => {
+test('a question that makes no progress still gets a researched final answer', async () => {
   const originalFetch = global.fetch;
   global.fetch = async (url) => {
     const u = String(url);
@@ -488,7 +535,7 @@ test('a question that runs out of steps still gets a researched final answer', a
       name: 'mock',
       chatStream: async () => {
         calls++;
-        if (calls <= MAX_ITERATIONS) {
+        if (calls <= LOOP_CALLS) {
           return {
             message: {
               content: '',

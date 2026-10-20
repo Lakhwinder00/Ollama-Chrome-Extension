@@ -38,13 +38,16 @@ User → Ollama ("I need to read login.js")
   resolved and checked before it touches disk.
 - Dangerous **file/shell/git** operations (`write_file`, `edit_file`, `delete_file`, `run_command`,
   `git_commit`, `git_checkout`) pause and ask for approval first.
-- **Browser actions need no approval**: the agent may read the page, take screenshots, click any
-  button, type, and update/insert/remove elements on the active tab freely.
+- **Browser actions need no approval** by default: the agent may read the page, take screenshots,
+  click any button, type, and update/insert/remove elements on the active tab freely. Settings →
+  Automation → *Autonomy* can switch this to "confirm each change" or "describe only".
 - Approvals (for file/shell/git) have **scopes**: *Once*, *Session*, or *Always* (persisted in
   `~/.myagent/permissions.json`).
 - Every page change is shown live in the tab: a "Agent …" toast plus a colored highlight on the
   exact element, so you can watch each click, typing, edit, insert, and delete happen.
-- The server binds to `127.0.0.1` only.
+- The server binds to `127.0.0.1` only, and **only the Chrome extension and non-browser clients
+  (CLI, desktop app) may talk to it** — a web page cannot drive the local agent (see
+  [Server security](#server-security)).
 
 ## Requirements
 
@@ -86,13 +89,16 @@ Pick a model from the dropdown, then just ask it to fix a bug.
 > **Active-tab context:** the side panel has a "Read active tab into context"
 > toggle (on by default). When enabled, it captures the active tab's URL, title,
 > and text and attaches it to each message so the agent can plan and act on the
-> page step by step, like Claude.
+> page step by step, like Claude. *Send to the model* picks how much is read:
+> **Selected text** (what you highlighted), **Visible page** (only what is on
+> screen right now) or **Full page** (scrolled through and collected).
 
 > **Edit requests act, they don't research:** asking to "update / fix / save /
 > delete" something on the page makes the model review the active tab and change
 > it (`get_dom` → `click`/`type`/`edit_element` → screenshot) instead of running a
-> web search and writing an analysis. Browser actions run without approval — each
-> change is highlighted live in your tab so you can watch it happen.
+> web search and writing an analysis. Browser actions run without approval —
+> switch *Automation → Autonomy* to "confirm each change" or "describe only" —
+> and each change is highlighted live in your tab so you can watch it happen.
 
 ## Server API
 
@@ -100,14 +106,25 @@ Pick a model from the dropdown, then just ask it to fix a bug.
 | ------------- | ------ | -------------------------------------- | ----------------------------- |
 | `/health`     | GET    | —                                      | Ollama + project status       |
 | `/models`     | GET    | —                                      | Installed models + details    |
+| `/model_info` | GET    | `?name=<model>&provider=<id>`         | Context size, tools, thinking  |
+| `/providers`  | GET    | —                                      | Available providers            |
 | `/project`    | GET    | —                                      | Current project root          |
 | `/project`    | POST   | `{ "root": "C:\\path" }`               | Set project root              |
-| `/chat`       | POST   | `{ sessionId?, message, model?, autoApprove? }` | Server-Sent Events stream |
+| `/chat`       | POST   | `{ sessionId?, message, userRequest?, model?, autoApprove? }` | Server-Sent Events stream |
 | `/approve`    | POST   | `{ "id": "…", "allowed": true, "scope": "once|session|always" }` | Resolve a pending approval |
 | `/browser/result` | POST | `{ "id": "…", "result" or "error" }` | Return a browser-tool result  |
+| `/stop`       | POST   | `{ "sessionId": "…" }`                 | Cancel a running turn         |
+| `/session`    | DELETE | `{ "sessionId": "…" }`                 | Forget the session            |
 
 `/chat` streams these SSE events: `start`, `status`, `assistant`, `tool`,
 `tool_result`, `tool_denied`, `approve_request`, `browser_request`, `done`, `error`.
+
+The extension sends two fields for the request:
+
+- `message` — what the model sees: the live-page frame (URL, title) plus the user's request.
+- `userRequest` — the user's own words, without any page text. The server routes the request
+  (page work vs. research) on this, so a page that happens to contain the word "latest" cannot
+  turn an edit into a research task.
 
 Quick test without the extension:
 
@@ -115,6 +132,20 @@ Quick test without the extension:
 $body = @{ message = "List the files in the project root and tell me what the project is."; model = "qwen2.5-coder:14b"; autoApprove = $true } | ConvertTo-Json
 Invoke-WebRequest -Uri http://127.0.0.1:8787/chat -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 300
 ```
+
+## Server security
+
+The server can write files and run shell commands, so it refuses to be driven by a web page:
+
+- **Origin allow-list** — only the Chrome extension (`chrome-extension://…`) and clients that send
+  no `Origin` header (the CLI, the desktop app, `curl`) are served. A normal website, a sandboxed
+  iframe (`Origin: null`) or a `file://` page gets `403`.
+- **Host check** — while the server is bound to loopback, the `Host` header must be `127.0.0.1`,
+  `localhost` or `[::1]`. This blocks DNS rebinding (an attacker name that resolves to 127.0.0.1).
+- **Loopback bind** — `HOST` defaults to `127.0.0.1`. Binding it to `0.0.0.0` prints a warning.
+
+Provider API keys and the OpenCode password are stored in `~/.myagent/providers.json`
+(mode `0600` on POSIX) so they survive a server restart.
 
 ## Free MCP server (web research)
 
@@ -187,7 +218,8 @@ npm test
 
 Covers path-traversal safety, read/write/edit/delete/list/search, git tools
 (including `git_commit`/`git_checkout`), tool-call normalization, the provider
-contract, and the always-allow permission store.
+contract, the always-allow permission store, the server's origin/host policy,
+the credential store, and the extension's request-intent helpers.
 
 ## Project layout
 
@@ -197,6 +229,8 @@ agent/
   ollama.js     thin Ollama HTTP client (streaming)
   provider.js   IModelProvider contract + OllamaProvider
   permissions.js persistent "always allow" store (~/.myagent/permissions.json)
+  secrets.js    persistent provider API keys (~/.myagent/providers.json)
+  http-security.js origin/host policy for the HTTP server
   tools.js      file/git/shell/web tools + schemas
   agent.js      the agent loop + system prompt + rules
   web.js        free web search / fetch helpers
@@ -212,11 +246,16 @@ tests/
   agent.test.js     tool-call normalization + prompt
   provider.test.js  IModelProvider contract
   permissions.test.js always-allow store
+  secrets.test.js   provider credential store
+  http-security.test.js origin/host policy
+  intent.test.js    extension request-intent helpers
 extension/
   manifest.json MV3 manifest (side panel)
   sidepanel.html right-side panel UI
   popup.css     dark Claude-style theme
   popup.js      SSE streaming client, approvals, browser tools, persistence
+  intent.js     request intent helpers (edit? research? ambiguous?)
+  markdown.js   Markdown renderer + syntax highlighting
   background.js opens the side panel on toolbar click
 ```
 

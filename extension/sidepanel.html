@@ -145,7 +145,7 @@
             </label>
             <label class="checkbox">
               <input id="autoPrompt" type="checkbox" checked />
-              Auto-fill prompt with page context
+              Add page context and instructions to the prompt
             </label>
           </div>
           <p class="hint">Auto-search only fires for research requests ("look up…") or current info ("latest…"). Anything else is left to the model, which searches on its own when it can't answer confidently.</p>
@@ -167,8 +167,17 @@
           <p class="hint" id="micPermStatus" style="margin-top: 4px; font-size: 10px;"></p>
         </div>
         <div class="control-group">
+          <span class="label">Autonomy</span>
+          <select id="autonomy" title="How much the agent does on the page by itself">
+            <option value="auto">Act on the page (no confirmation)</option>
+            <option value="ask">Confirm before each change</option>
+            <option value="manual">Describe only, never act</option>
+          </select>
+          <p class="hint">Autonomy applies to browser changes. File, shell and git operations always ask for approval.</p>
+        </div>
+        <div class="control-group">
           <span class="label">Research</span>
-          <select id="researchMode">
+          <select id="researchMode" title="How much of the page is sent to the model">
             <option value="full">Full page research</option>
             <option value="summary">Summary only</option>
             <option value="links">Find and follow links</option>
@@ -227,6 +236,7 @@
   <section id="approval" class="approval hidden">
     <div class="approval-text">
       <strong id="approvalName">run_command</strong>
+      <span id="approvalCount" class="approval-count"></span>
       <pre id="approvalArgs"></pre>
     </div>
     <div class="approval-actions">
@@ -252,6 +262,7 @@
   </footer>
 
   <script src="markdown.js"></script>
+  <script src="intent.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

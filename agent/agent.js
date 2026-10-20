@@ -847,9 +847,12 @@ async function runAgent({
   // ALWAYS turn the run into a real result: synthesize one (with a strict
   // plain-text retry), and when that still fails, research the question from
   // scratch — then attach a progress summary. There is no dead-end message.
+  const isPageAction = isPageActionRequest(history);
   onEvent({
     type: 'status',
-    message: `No new progress after ${MAX_STAGNANT_STEPS} repeated steps — finishing with a researched answer and a summary…`,
+    message: isPageAction
+      ? `No new progress after ${MAX_STAGNANT_STEPS} repeated steps — finishing with a summary of what changed…`
+      : `No new progress after ${MAX_STAGNANT_STEPS} repeated steps — finishing with a researched answer and a summary…`,
   });
   const synthesized = await synthesizeFinalAnswer({ history, provider, model, signal, onEvent });
   if (synthesized) {
@@ -858,7 +861,7 @@ async function runAgent({
   }
 
   let answer = null;
-  if (!isPageActionRequest(history)) {
+  if (!isPageAction) {
     const fallback = await runWebResearchFallback(history, onEvent);
     answer = (fallback && fallback.content) || null;
   }

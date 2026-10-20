@@ -1072,6 +1072,11 @@ details.section[open] > summary {
   max-height: 42px;
   overflow: auto;
 }
+.approval-count {
+  margin-left: 6px;
+  font-size: 10px;
+  color: var(--text-2);
+}
 .approval-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .approval-actions .btn { flex: 1 1 auto; min-width: 62px; padding: 6px 10px; }
 

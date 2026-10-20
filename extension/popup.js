@@ -42,6 +42,7 @@ let settings = {
   findBestLink: true,
   autoPrompt: true,
   researchMode: 'full',
+  autonomy: 'auto',
   searchProvider: 'google',
   contextMode: 'full',
   opencodeUrl: 'http://127.0.0.1:4096',
@@ -74,6 +75,7 @@ async function loadSettings() {
   $('findBestLink').checked = settings.findBestLink !== false;
   $('autoPrompt').checked = settings.autoPrompt !== false;
   $('researchMode').value = settings.researchMode || 'full';
+  if ($('autonomy')) $('autonomy').value = settings.autonomy || 'auto';
   if ($('searchProvider')) $('searchProvider').value = settings.searchProvider || 'google';
   if ($('contextMode')) $('contextMode').value = settings.contextMode || 'full';
   if ($('opencodeUrl')) $('opencodeUrl').value = settings.opencodeUrl || 'http://127.0.0.1:4096';
@@ -315,6 +317,8 @@ function initVoiceRecognition() {
 
   recognition.onstart = () => {
     isListening = true;
+    // A new dictation starts fresh: the same phrase must be addable twice.
+    lastAdded = '';
     if (micBtn) {
       micBtn.classList.add('listening');
       micBtn.textContent = '⏹';
@@ -324,8 +328,6 @@ function initVoiceRecognition() {
     inputEl.placeholder = 'Listening…';
   };
 
-  let lastAdded = '';
-  
   recognition.onresult = (event) => {
     let finalTranscript = '';
     let interimTranscript = '';
@@ -633,6 +635,8 @@ function endRun(state) {
   setGenState(state || 'idle');
   flushAssistantPaint();
   updateActionButtons();
+  // Take the agent's element markers off the page again.
+  clearAgentMarkers();
 }
 
 // ---------------- rendering ----------------
@@ -843,31 +847,67 @@ function appendToolResult(ok, summary, detail) {
 }
 
 // ---------------- approval banner ----------------
+// Approvals are queued: a second request must not overwrite the first one,
+// otherwise the first call hangs until the server times it out.
+const approvalQueue = [];
+let activeApproval = null;
+
+function renderApproval() {
+  const el = $('approval');
+  if (!el) return;
+  if (!activeApproval) {
+    el.classList.add('hidden');
+    delete el.dataset.id;
+  } else {
+    $('approvalName').textContent = activeApproval.name;
+    $('approvalArgs').textContent =
+      typeof activeApproval.args === 'string'
+        ? activeApproval.args
+        : JSON.stringify(activeApproval.args, null, 2);
+    el.classList.remove('hidden');
+    el.dataset.id = activeApproval.id;
+  }
+  const count = $('approvalCount');
+  if (count) {
+    const waiting = approvalQueue.length;
+    count.textContent = waiting ? `+${waiting} more waiting` : '';
+  }
+}
+
 function showApproval(id, name, args) {
-  $('approvalName').textContent = name;
-  $('approvalArgs').textContent =
-    typeof args === 'string' ? args : JSON.stringify(args, null, 2);
-  $('approval').classList.remove('hidden');
-  $('approval').dataset.id = id;
+  if (activeApproval) approvalQueue.push({ id, name, args });
+  else activeApproval = { id, name, args };
+  renderApproval();
 }
 
 function hideApproval() {
-  $('approval').classList.add('hidden');
-  delete $('approval').dataset.id;
+  activeApproval = null;
+  approvalQueue.length = 0;
+  renderApproval();
+}
+
+function nextApproval() {
+  activeApproval = approvalQueue.shift() || null;
+  renderApproval();
 }
 
 async function respondApproval(allowed, scope) {
-  const id = $('approval').dataset.id;
+  const id = activeApproval && activeApproval.id;
   if (!id) return;
-  hideApproval();
+  nextApproval(); // the next request (if any) takes over the banner
   try {
-    await fetch(`${settings.serverUrl || DEFAULT_SERVER}/approve`, {
+    const res = await fetch(`${settings.serverUrl || DEFAULT_SERVER}/approve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id, allowed, scope }),
     });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      appendStatus('⚠ Approval not registered: ' + (data.error || res.status));
+    }
   } catch (e) {
     // The server may have gone away; nothing useful to do here.
+    appendStatus('⚠ Could not reach the server to answer the approval.');
   }
 }
 
@@ -916,10 +956,48 @@ async function pageGetPage(args) {
       if (!t || seen.has(t)) continue;
       seen.add(t);
       parts.push(t);
-      total += t.length;
-      if (total >= maxChars) return false;
+      total += t.length + 1;
+      if (total >= maxChars) return total;
     }
-    return true;
+    return total;
+  };
+
+  /**
+   * Collect the text that is actually on screen. Walks the visible text nodes
+   * and keeps the ones inside the viewport, so "Visible page" really means
+   * "what the user can see right now" instead of the whole document.
+   */
+  const collectVisible = (parts, seen, total) => {
+    const vh = window.innerHeight;
+    const vw = window.innerWidth;
+    const styleCache = new Map();
+    const hidden = (el) => {
+      if (styleCache.has(el)) return styleCache.get(el);
+      let out = false;
+      try {
+        const st = window.getComputedStyle(el);
+        out = st.visibility === 'hidden' || st.display === 'none' || st.opacity === '0';
+      } catch (e) {
+        out = false;
+      }
+      styleCache.set(el, out);
+      return out;
+    };
+    const walker = document.createTreeWalker(document.body || document, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      const el = node.parentElement;
+      if (!el || hidden(el)) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.bottom < 0 || rect.top > vh || rect.right < 0 || rect.left > vw) continue;
+      const t = (node.nodeValue || '').replace(/\s+/g, ' ').trim();
+      if (!t || seen.has(t)) continue;
+      seen.add(t);
+      parts.push(t);
+      total += t.length + 1;
+      if (total >= maxChars) return total;
+    }
+    return total;
   };
 
   const seen = new Set();
@@ -931,17 +1009,17 @@ async function pageGetPage(args) {
   if (mode === 'visible') {
     // No scrolling: capture the page as currently rendered, then put the
     // scroll position back exactly where the user left it.
-    collect(parts, seen, total);
+    total = collectVisible(parts, seen, total);
     window.scrollTo(0, startY);
   } else {
-    let keepGoing = collect(parts, seen, total);
-    while (keepGoing && scrolls < maxScrolls) {
+    total = collect(parts, seen, total);
+    while (total < maxChars && scrolls < maxScrolls) {
       const before = window.scrollY;
       window.scrollBy({ top: Math.round(window.innerHeight * 0.85) });
       scrolls++;
       await new Promise((r) => setTimeout(r, 120));
       if (window.scrollY <= before) break;
-      keepGoing = collect(parts, seen, total);
+      total = collect(parts, seen, total);
     }
     window.scrollTo(0, startY);
   }
@@ -1472,42 +1550,6 @@ function pageScroll(args) {
   return { direction: dir, amount, scrollYBefore: before };
 }
 
-function pageGetLinks() {
-  const nodes = document.querySelectorAll('a[href]');
-  const links = [];
-  for (const el of Array.from(nodes)) {
-    const href = el.getAttribute('href') || '';
-    const text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120);
-    if (text) {
-      links.push({
-        tag: el.tagName.toLowerCase(),
-        href,
-        text,
-      });
-    }
-  }
-  return { url: location.href, count: links.length, links };
-}
-
-function highlightElement(el, color = 'rgba(40,167,67,.4)') {
-  const box = document.createElement('div');
-  box.style.cssText =
-    'position:fixed;z-index:2147483647;pointer-events:none;border:3px solid #28a745;border-radius:4px;box-shadow:0 0 0 2px rgba(40,167,67,.4),0 0 14px rgba(40,167,67,.7);transition:all .12s ease;';
-  const place = () => {
-    const r = el.getBoundingClientRect();
-    box.style.left = r.left + 'px';
-    box.style.top = r.top + 'px';
-    box.style.width = r.width + 'px';
-    box.style.height = r.height + 'px';
-  };
-  place();
-  document.body.appendChild(box);
-  const onScroll = () => place();
-  window.addEventListener('scroll', onScroll, { passive: true });
-  setTimeout(() => { box.remove(); window.removeEventListener('scroll', onScroll); }, 2000);
-  return box;
-}
-
 function pageGetLinksWithIds() {
   const nodes = document.querySelectorAll('a[href], button[onclick], input[type="submit"], input[type="button"]');
   const elements = [];
@@ -1986,6 +2028,36 @@ function isRestrictedUrl(url) {
   );
 }
 
+/**
+ * Remove the `data-agent-idx` markers the agent leaves on the page.
+ * Injected into the tab, so it must be self-contained.
+ */
+function clearMarkersInPage() {
+  try {
+    for (const old of document.querySelectorAll('[data-agent-idx]')) {
+      old.removeAttribute('data-agent-idx');
+    }
+  } catch (e) {
+    // best-effort
+  }
+  return true;
+}
+
+/** Clean the page up after a run so the host site does not keep our markers. */
+async function clearAgentMarkers() {
+  try {
+    if (!chrome.scripting) return;
+    const tab = await getActiveTab();
+    if (!tab || isRestrictedUrl(tab.url)) return;
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: clearMarkersInPage,
+    });
+  } catch (e) {
+    // The tab may be closed or protected — nothing to clean up then.
+  }
+}
+
 async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || tab.id == null) throw new Error('No active tab found.');
@@ -2257,12 +2329,13 @@ async function handleBrowserRequest(payload) {
 // ---------------- SSE streaming ----------------
 function parseSSE(raw) {
   let event = '';
-  let data = '';
-  for (const line of raw.split('\n')) {
+  const dataLines = [];
+  for (const line of String(raw).split(/\r?\n/)) {
     if (line.startsWith('event:')) event = line.slice(6).trim();
-    else if (line.startsWith('data:')) data += line.slice(5).replace(/^ /, '');
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
   }
-  return { event, data };
+  // The SSE spec joins multiple data lines with a newline.
+  return { event, data: dataLines.join('\n') };
 }
 
 function handleEvent(event, data) {
@@ -2360,6 +2433,7 @@ async function readStream(body) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
+    buffer = buffer.replace(/\r\n/g, '\n');
     let idx;
     while ((idx = buffer.indexOf('\n\n')) !== -1) {
       const raw = buffer.slice(0, idx);
@@ -2368,6 +2442,7 @@ async function readStream(body) {
       if (event) handleEvent(event, data);
     }
   }
+  buffer += decoder.decode();
   if (buffer.trim()) {
     const { event, data } = parseSSE(buffer);
     if (event) handleEvent(event, data);
@@ -2375,70 +2450,8 @@ async function readStream(body) {
 }
 
 // ---------------- sending ----------------
-/**
- * True when the user wants the PAGE changed ("update my profile", "fix the
- * headline") rather than an answer to a question — those prompts must tell the
- * model to edit the active tab instead of writing an analysis.
- */
-function looksLikePageEditRequest(text) {
-  const t = String(text || '').trim();
-  if (!t) return false;
-  const question =
-    t.includes('?') ||
-    /^\s*(what|who|when|where|why|how|which|is|are|was|were|does|did|do|can|could|will|would|should|explain|describe|summar\w*|tell me)\b/i.test(
-      t
-    );
-  if (question) return false;
-
-  // Check for current page mentions - more comprehensive patterns
-  const currentPagePatterns = [
-    /\b(current\s+(page|tab|window)|page\s+(is|on)|tab\s+(is|on)|this.*page|that.*page|here)\b/i,
-    /\b(make\s+(current|active)|change\s+(the|this|that).*page|set\s+(current|active)|update\s+(the|this|that).*page)\b/i,
-    /\b(switch.*to\s+current|go\s+to\s+tab\s+.*on|focus\s+on\s+current|scroll.*to\s+current|visit\s+this.*page)\b/i,
-    /\b(show\s+(me|what's).*on\s+(current|this|that).*\b)\b/i,
-    /\b(open|view|load|navigate)\s+(to\s+)?(current|this|that|my).*page\b/i,
-  ];
-
-  for (const pattern of currentPagePatterns) {
-    if (pattern.test(t)) {
-      return true; // First ask clarifying question
-    }
-  }
-
-  return /\b(updat\w*|edit\w*|chang\w*|fix\w*|correct\w*|replac\w*|rewrit\w*|fill\w*|add\w*|remov\w*|delet\w*|sav\w*|submit\w*|publish\w*|post\w*|writ\w*|appl\w*|renam\w*|complet\w*|improv\w*)\b/i.test(
-    t
-  );
-}
-
-/**
- * Smarter auto-search: instead of firing a browser search for every message,
- * only three conditions trigger it up front —
- *   1. an explicit research request ("look up", "research", "google X"),
- *   2. a request for current information ("latest", "today", "news", …),
- *   3. (server-side) the model can't answer confidently — handled by the
- *      agent's own web-research fallback, not here.
- * Anything else is left to the model's own judgment.
- */
-function shouldAutoSearch(text) {
-  const t = String(text || '').trim();
-  if (!t) return { ok: false, reason: 'empty' };
-  if (looksLikePageEditRequest(t)) return { ok: false, reason: 'page-edit' };
-  if (
-    /\b(look\s*up|research|google|web\s*search|search\s+(?:the\s+)?(?:web|online|internet|google|duckduckgo|bing|news)|find\s+me\s|dig\s*up|hunt\s*down)\b/i.test(
-      t
-    )
-  ) {
-    return { ok: true, reason: 'explicit-research' };
-  }
-  if (
-    /\b(latest|breaking|today|tonight|yesterday|this\s+(?:week|month|year)|currently|right\s+now|as\s+of|recent(?:ly)?|news|score[sd]?|weather|stock|price[sd]?|release\s+(?:date|notes)|who\s+(?:won|is\s+leading)|what(?:'s| is)\s+the\s+(?:latest|current)|20(?:2[5-9]|[3-9]\d))\b/i.test(
-      t
-    )
-  ) {
-    return { ok: true, reason: 'current-info' };
-  }
-  return { ok: false, reason: 'model-decides' };
-}
+// The intent helpers (looksLikePageEditRequest / pageAmbiguityNote /
+// shouldAutoSearch) live in intent.js so they can be unit tested.
 
 // --- search provider -------------------------------------------------------
 
@@ -2490,69 +2503,31 @@ function updateContextIndicator() {
   }
 }
 
-// Capture the active tab's content and frame it as context for the model.
+/**
+ * A short, factual frame about the live page.
+ *
+ * The page *content* is not repeated here: it travels to the server as
+ * `pageInfo`, and the server puts it into the scope prompt for the model.
+ * Putting it in both places would double the prompt size for every message.
+ */
 function buildTabContext(snap) {
   const s = snap || {};
   return [
-    '[Active browser tab — captured by the extension. This page is open in front of the user right now, so act on it directly with the browser tools (click, type, edit_element, add_element) instead of telling the user to do things manually.]',
+    '[Active browser tab — captured by the extension. The page is open in front of the user right now. When the request is about this page, act on it directly with the browser tools (get_dom, click, type, edit_element, add_element) instead of telling the user what to do.]',
     'URL: ' + (s.url || ''),
     'Title: ' + (s.title || ''),
     s.mode ? 'Captured: ' + (CONTEXT_MODE_LABELS[s.mode] || s.mode) : '',
     s.empty ? '(The user had nothing selected, so no selection text was captured.)' : '',
-    '---',
-    s.text || '',
     '[/Active browser tab]',
   ]
     .filter((line) => line !== '')
     .join('\n');
 }
 
-/**
- * Check if text mentions "current page" or refers to it in a way that needs clarification.
- * This ensures users clarify what specific page or tab they want when asking about it.
- */
-function askForPageClarification(text) {
-  const t = String(text || '').trim();
-  if (!t) return null;
-
-  // Detect various ways users might refer to the current page
-  // Including: "this page", "current page", "tab I'm on", etc.
-  const currentPagePatterns = [
-    /\b(current\s+(page|tab|window)|page\s+(is|on)|tab\s+(is|on)|this.*page|that.*page|here)\b/i,
-    /\b(make\s+(current|active)|change\s+(the|this|that).*page|set\s+(current|active)|update\s+(the|this|that).*page)\b/i,
-    /\b(switch.*to\s+current|go\s+to\s+tab\s+.*on|focus\s+on\s+current|scroll.*to\s+current|visit\s+this.*page)\b/i,
-    /\b(show\s+(me|what's).*on\s+(current|this|that).*\b)\b/i,
-    /\b(open|view|load|navigate)\s+(to\s+)?(current|this|that|my).*page\b/i,
-  ];
-
-  for (const pattern of currentPagePatterns) {
-    if (pattern.test(t)) {
-      const options = [
-        'I am currently on',
-        'I want to change',
-        'I want to navigate to',
-        'I want to view'
-      ];
-      const example = options[Math.floor(Math.random() * options.length)];
-      return `What would you like to do? ${example} the page you're referring to, including: 1) The specific URL, 2) A different browser tab, 3) The active browser tab currently selected, or 4) A section on this page?`;
-    }
-  }
-
-  return null;
-}
-
 async function sendMessage(overrideText, options) {
   const opts = options || {};
   const isRegen = typeof overrideText === 'string';
   const text = isRegen ? overrideText : inputEl.value.trim();
-  // Check for page clarification request
-  if (!isRegen && !streaming) {
-    const clarification = askForPageClarification(text);
-    if (clarification) {
-      appendStatus('❓ Clarification: ' + clarification);
-      return;
-    }
-  }
   if (!text || streaming) return;
   if (!isRegen) {
     inputEl.value = '';
@@ -2569,8 +2544,7 @@ async function sendMessage(overrideText, options) {
   // Optionally read the active browser tab and attach it as context so the
   // agent can plan and act on the page step by step (like Claude). The mode
   // (selection / visible / full page) comes from Settings → Context.
-  let outMessage = text;
-  let capturedFullSnap = null;
+  let pageFrame = '';
   let pageInfoForScope = null;
   if (settings.includeTab !== false) {
     const mode = currentContextMode();
@@ -2581,7 +2555,6 @@ async function sendMessage(overrideText, options) {
         max_scrolls: mode === 'full' ? 1 : 0,
         mode,
       });
-      if (mode === 'full') capturedFullSnap = snap;
       // Scope routing needs the page's identity and some text in every mode.
       pageInfoForScope = {
         title: (snap && snap.title) || '',
@@ -2591,75 +2564,82 @@ async function sendMessage(overrideText, options) {
       if (mode === 'selection' && snap && snap.empty) {
         appendStatus('ℹ Nothing selected — sending without page context');
       } else {
-        outMessage = buildTabContext(snap) + '\n\n' + text;
+        pageFrame = buildTabContext(snap);
       }
     } catch (e) {
       appendStatus('⚠ Could not read page: ' + ((e && e.message) || e));
-      outMessage = text;
     }
   }
 
-  // Generate a prompt from user input + page context. Searching Google with
-  // it is opt-in (autoSearchOnSend) — by default the model decides if and
-  // when a search is needed and runs it itself, visible in the active tab.
-  const userPrompt = trimAll(text);
-  let searchPrompt = userPrompt || 'analyze this webpage and provide insights';
-
-  // Build the actual message prompt combining page context + user intent
-  if (settings.autoPrompt && settings.researchMode) {
-    appendStatus('🔍 Generating research prompt…');
+  // Research mode decides how much of the page the model gets. The page is
+  // sent to the server as `pageInfo`, which puts it into the scope prompt —
+  // so it is never repeated inside the request itself.
+  if (pageInfoForScope && settings.researchMode && settings.researchMode !== 'full') {
     try {
-      let pageContext = '';
-      if (settings.researchMode === 'full' || settings.researchMode === 'summary') {
-        // Reuse the page snapshot captured for context when we already have a
-        // full-page read; only re-read the tab if context was off/selection.
-        const snap =
-          capturedFullSnap ||
-          (await executeBrowserTool('get_page', { max_chars: 3000, max_scrolls: 1 }));
-        pageContext = (snap.text || '').slice(0, 3000);
-        if (settings.researchMode === 'summary') {
-          const sentences = pageContext.split(/[.!?]+/).filter(s => s.trim().length > 10);
-          pageContext = sentences.slice(0, 3).join('. ') + '.';
-        }
-      }
-      if (settings.researchMode === 'links') {
+      if (settings.researchMode === 'summary') {
+        const sentences = pageInfoForScope.text
+          .split(/[.!?]+/)
+          .filter((s) => s.trim().length > 10);
+        pageInfoForScope.text = sentences.slice(0, 3).join('. ') + '.';
+      } else if (settings.researchMode === 'links') {
         const linksSnap = await executeBrowserTool('get_links');
         const relevantLinks = (linksSnap.elements || linksSnap.links || [])
           .filter((l) => (l.text || '').length > 10)
-          .slice(0, 5)
+          .slice(0, 8)
           .map((l) => `${l.text}: ${l.href}`)
           .join('\n');
-        pageContext = `Relevant links found on page:\n${relevantLinks}`;
+        pageInfoForScope.text = `Relevant links found on page:\n${relevantLinks}`;
       }
-      // Generate proper prompt: combine page context with user's question.
+    } catch (e) {
+      // Keep the full page text when the shaping failed.
+    }
+  }
+
+  // The user's own words stay the request. A canned template used to replace
+  // them, which made the model answer with an analysis instead of doing the
+  // work — and it flooded the server's scope routing with page text, so a
+  // page containing the word "latest" turned an edit into a research task.
+  const userPrompt = trimAll(text);
+  let request = userPrompt || 'analyze this webpage and provide insights';
+
+  // Auto-prompt adds the instruction that matches the request. Searching
+  // Google with it is opt-in (autoSearchOnSend) — by default the model decides
+  // if and when a search is needed and runs it itself, visible in the active
+  // tab.
+  if (settings.autoPrompt) {
+    appendStatus('🔍 Generating research prompt…');
+    try {
       // "Update my profile" must stay an EDIT task — the old template forced
       // "provide a comprehensive analysis", so the model researched instead of
       // changing the page.
-      searchPrompt = looksLikePageEditRequest(userPrompt)
-        ? `I'm on a webpage with this content:\n${pageContext}\n\nThe user asks: "${userPrompt}". Review this active tab and perform the change yourself with the browser tools (get_dom, click, type, edit_element, add_element, delete_element), then screenshot to verify. Do NOT answer with analysis, research, or step-by-step instructions — actually update the page and report what you changed.`
-        : `I'm on a webpage with this content:\n${pageContext}\n\nThe user asks: "${userPrompt}". Please provide a comprehensive analysis and answer their question.`;
-      outMessage = searchPrompt;
+      const instruction = looksLikePageEditRequest(userPrompt)
+        ? 'Review the active tab and perform the change yourself with the browser tools (get_dom, click, type, edit_element, add_element, delete_element), then screenshot to verify. Do NOT answer with analysis, research, or step-by-step instructions — actually update the page and report what you changed.'
+        : 'Answer the question. Use the page context when it is relevant, and do the work (research, reading, filling in forms) instead of only describing how to do it.';
+      request = `${userPrompt}\n\n${instruction}`;
     } catch (e) {
       appendStatus('⚠ Prompt generation failed: ' + ((e && e.message) || e));
-      searchPrompt = userPrompt || 'analyze this webpage and provide insights';
     }
-    outMessage = searchPrompt;
-  } else if (userPrompt && !settings.autoPrompt) {
-    // Auto-prompt disabled but user typed something - use their prompt
-    searchPrompt = userPrompt;
-    outMessage = searchPrompt;
   }
+
+  // The wording may point at another tab or a section of the page — let the
+  // agent ask instead of guessing.
+  const ambiguity = pageAmbiguityNote(userPrompt);
+  if (ambiguity) request += '\n\n' + ambiguity;
+
+  // Compose the message: live-page frame (when there is one) + the request.
+  // With auto-prompt off the user's words are sent untouched.
+  let outMessage = settings.autoPrompt && pageFrame ? pageFrame + '\n\n' + request : request;
 
   // Auto-search only fires for research/current-info prompts (see
   // shouldAutoSearch); everything else is left to the model, which runs its
   // own web research when it can't answer confidently.
-  if (settings.autoSearchOnSend && searchPrompt && !outMessage.includes('google.com/search')) {
+  if (settings.autoSearchOnSend && userPrompt && !outMessage.includes('google.com/search')) {
     const decision = shouldAutoSearch(text);
     if (decision.ok) {
       appendStatus(`🔍 Searching (${decision.reason === 'explicit-research' ? 'research request' : 'current info'})…`);
       try {
-        await executeBrowserTool('search', { query: searchPrompt });
-        outMessage = outMessage + '\n\n[Search performed based on your prompt: ' + searchPrompt + ']';
+        await executeBrowserTool('search', { query: userPrompt });
+        outMessage = outMessage + '\n\n[Search performed based on your prompt: ' + userPrompt + ']';
       } catch (e) {
         appendStatus('⚠ Search failed: ' + ((e && e.message) || e));
         outMessage = outMessage + '\n\n[Search failed: ' + (e && e.message || 'unknown error') + ']';
@@ -2670,13 +2650,20 @@ async function sendMessage(overrideText, options) {
   const body = {
     sessionId: settings.sessionId,
     message: outMessage,
+    // The user's own words, without the page frame or the instructions. The
+    // server routes the request (page vs. research) on this, so it must not
+    // contain page text.
+    userRequest: userPrompt,
     model: settings.model || undefined,
     provider: settings.provider || undefined,
     autoApprove: settings.autoApprove,
     searchProvider: settings.searchProvider || undefined,
     findBestLink: settings.findBestLink !== false,
     currentPageOnly: settings.includeTab !== false,
-    mode: settings.researchMode || 'full',
+    // Autonomy for the agent: 'auto' acts, 'ask' confirms, 'manual' only
+    // describes. This is NOT the research mode (that shapes the page text and
+    // is applied here, before the request is sent).
+    mode: settings.autonomy || 'auto',
     pageInfo: pageInfoForScope || undefined,
   };
 
@@ -3086,7 +3073,10 @@ function updateProjectPill(data) {
       ? `${PROJECT_STATUS_LABELS[status] || status} · ${nameEl ? nameEl.textContent : ''}`
       : 'Not set';
   }
-  if (root) settings.projectRoot = root;
+  if (root) {
+    settings.projectRoot = root;
+    saveSettings();
+  }
 }
 
 /** Poll GET /project while the server is scanning; one shot otherwise. */
@@ -3219,15 +3209,26 @@ function updateTabFavicon(tab, url) {
 }
 
 function clearHistory() {
+  const sessionId = settings.sessionId;
   settings.sessionId = null;
   transcript = [];
   messagesEl.innerHTML = '';
   lastBlock = null;
+  hideApproval();
   saveSettings();
   chrome.storage.local.set({ transcript: [] });
   setResponseTime(0);
   setGenState('idle');
   updateActionButtons();
+  if (sessionId) {
+    // Let the server drop the session as well, so it does not keep the
+    // conversation history alive in memory.
+    fetch(`${settings.serverUrl || DEFAULT_SERVER}/session`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    }).catch(() => {});
+  }
 }
 
 function deleteHistory() {
@@ -3312,7 +3313,10 @@ function init() {
   refreshActiveTabProfile();
   if (chrome.tabs && chrome.tabs.onActivated) {
     chrome.tabs.onActivated.addListener(refreshActiveTabProfile);
-    chrome.tabs.onUpdated.addListener(() => refreshActiveTabProfile());
+    // Only the active tab matters — the panel shows its context.
+    chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
+      if (!tab || tab.active) refreshActiveTabProfile();
+    });
     chrome.windows.onFocusChanged.addListener(() => refreshActiveTabProfile());
   }
 
@@ -3470,6 +3474,12 @@ function init() {
     settings.researchMode = e.target.value;
     saveSettings();
   });
+  if ($('autonomy')) {
+    $('autonomy').addEventListener('change', (e) => {
+      settings.autonomy = e.target.value;
+      saveSettings();
+    });
+  }
   $('refreshModels').addEventListener('click', loadModels);
   $('approveBtn').addEventListener('click', () => respondApproval(true, 'once'));
   $('sessionBtn').addEventListener('click', () => respondApproval(true, 'session'));

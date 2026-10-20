@@ -21,6 +21,14 @@ const {
   getProviderNames,
 } = require('./provider');
 const { loadAlwaysAllowed, allowAlways } = require('./permissions');
+const { isOriginAllowed, corsHeadersFor, isLoopbackHost } = require('./http-security');
+const {
+  loadStore,
+  setApiKey,
+  clearApiKey,
+  getOpencodeAuth,
+  setOpencodeAuth,
+} = require('./secrets');
 const {
   setProjectRoot,
   getProjectRoot,
@@ -71,24 +79,78 @@ async function getCapabilities(provider) {
 // ---------------------------------------------------------------------------
 const sessions = new Map();
 
+// Sessions live in memory only. They are dropped after two hours of silence
+// and the total is capped, so a long-running server cannot grow without bound.
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+const MAX_SESSIONS = 50;
+
 function ensureSession(sessionId) {
-  if (sessionId && sessions.has(sessionId)) return sessions.get(sessionId);
+  pruneSessions();
+  if (sessionId && sessions.has(sessionId)) {
+    const existing = sessions.get(sessionId);
+    existing.lastUsed = Date.now();
+    return existing;
+  }
   const id =
     sessionId || `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-  const session = { id, model: DEFAULT_MODEL, messages: [], approvedTools: new Set() };
+  const session = {
+    id,
+    model: DEFAULT_MODEL,
+    messages: [],
+    approvedTools: new Set(),
+    lastUsed: Date.now(),
+  };
   sessions.set(id, session);
   return session;
+}
+
+/** Forget expired sessions and evict the oldest ones past the cap. */
+function pruneSessions() {
+  const now = Date.now();
+  for (const [id, s] of sessions) {
+    if (now - (s.lastUsed || 0) > SESSION_TTL_MS) {
+      sessions.delete(id);
+      sessionProviders.delete(id);
+    }
+  }
+  while (sessions.size > MAX_SESSIONS) {
+    let oldestId = null;
+    let oldest = Infinity;
+    for (const [id, s] of sessions) {
+      if ((s.lastUsed || 0) < oldest) {
+        oldest = s.lastUsed || 0;
+        oldestId = id;
+      }
+    }
+    if (!oldestId) break;
+    sessions.delete(oldestId);
+    sessionProviders.delete(oldestId);
+  }
+}
+
+/** Drop a session and abort a run in flight ("New chat" / "Clear history"). */
+function deleteSession(sessionId) {
+  if (!sessionId) return false;
+  const existed = sessions.delete(sessionId);
+  sessionProviders.delete(sessionId);
+  const ac = activeRuns.get(sessionId);
+  if (ac) {
+    ac.abort();
+    activeRuns.delete(sessionId);
+  }
+  return existed;
 }
 
 // Active chat runs (sessionId -> AbortController) so /stop can cancel them.
 const activeRuns = new Map();
 
-// Provider API key storage (in-memory, persisted via /providers endpoints)
-const providerApiKeys = new Map();
+// Provider API key storage. Persisted in ~/.myagent/providers.json so the keys
+// survive a server restart instead of having to be re-typed every time.
+const providerApiKeys = new Map(Object.entries(loadStore().apiKeys));
 
 // OpenCode configuration
 let opencodeUrl = process.env.OPENCODE_URL || 'http://127.0.0.1:4096';
-let opencodeAuth = null; // { type: 'basic', password } or { type: 'bearer', token }
+let opencodeAuth = getOpencodeAuth(); // { type: 'basic', password } or { type: 'bearer', token }
 
 // Session provider mapping
 const sessionProviders = new Map();
@@ -145,17 +207,15 @@ function requestBrowserFactory(emit) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-};
+// CORS is per request (res.corsHeaders, set by the request handler): only the
+// Chrome extension and origin-less clients (CLI, desktop app) are allowed, so
+// a random web page can never drive this server. See http-security.js.
 
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
-    ...CORS,
+    ...(res.corsHeaders || {}),
     'Content-Length': Buffer.byteLength(body),
   });
   res.end(body);
@@ -259,7 +319,7 @@ async function handleChat(req, res) {
     'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
-    ...CORS,
+    ...(res.corsHeaders || {}),
   });
 
   let closed = false;
@@ -301,13 +361,20 @@ async function handleChat(req, res) {
   const think = !!(caps[session.model] && caps[session.model].has('thinking'));
   const vision = !!(caps[session.model] && caps[session.model].has('vision'));
 
-  // Two-scope routing: decide whether this is a current-page task or research
+  // Two-scope routing: decide whether this is a current-page task or research.
+  // The client may send a composed message (page frame + instructions); the
+  // routing must run on the user's own words, otherwise page text that
+  // happens to contain "latest" or "search" flips an edit into a research task.
   const currentPageOnly = body.currentPageOnly !== false; // default ON
   const pageInfo = body.pageInfo || null;
+  const userRequest =
+    typeof body.userRequest === 'string' && body.userRequest.trim()
+      ? body.userRequest
+      : userMessage;
   let scope = 'research';
   if (currentPageOnly && pageInfo) {
     try {
-      scope = await routeScope(userMessage, pageInfo, true);
+      scope = await routeScope(userRequest, pageInfo, true);
     } catch {
       scope = 'research';
     }
@@ -349,7 +416,7 @@ async function handleChat(req, res) {
       messages: session.messages,
       tools,
       scope,
-      scopePrompt: buildScopePrompt(scope, pageInfo, body.mode || 'auto', userMessage),
+      scopePrompt: buildScopePrompt(scope, pageInfo, body.mode || 'auto', userRequest),
       autoApprove: !!body.autoApprove,
       think,
       vision,
@@ -421,7 +488,7 @@ async function handleStop(req, res) {
 // ---------------------------------------------------------------------------
 async function route(req, res, pathname) {
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, CORS);
+    res.writeHead(204, res.corsHeaders || {});
     res.end();
     return;
   }
@@ -499,6 +566,7 @@ async function route(req, res, pathname) {
     if (p.setApiKey) {
       p.setApiKey(apiKey);
       providerApiKeys.set(provider, apiKey);
+      setApiKey(provider, apiKey); // persist so a restart does not lose the key
       // Test the key
       const health = await p.health();
       sendJson(res, 200, { ok: true, ...health });
@@ -519,6 +587,7 @@ async function route(req, res, pathname) {
     if (p.setApiKey) {
       p.setApiKey(null);
       providerApiKeys.delete(provider);
+      clearApiKey(provider);
       sendJson(res, 200, { ok: true });
     } else {
       sendJson(res, 400, { ok: false, error: 'Provider does not support API keys.' });
@@ -559,6 +628,7 @@ async function route(req, res, pathname) {
     // Allow null to clear auth
     if (auth === null || auth === undefined) {
       opencodeAuth = null;
+      setOpencodeAuth(null);
       if (providers.has('opencode')) {
         providers.delete('opencode');
       }
@@ -578,6 +648,7 @@ async function route(req, res, pathname) {
       return;
     }
     opencodeAuth = auth;
+    setOpencodeAuth(auth);
     // Re-create the provider with new auth
     if (providers.has('opencode')) {
       providers.delete('opencode');
@@ -643,6 +714,13 @@ async function route(req, res, pathname) {
     return;
   }
 
+  if (req.method === 'DELETE' && pathname === '/session') {
+    const body = await readJson(req);
+    const deleted = deleteSession(body.sessionId);
+    sendJson(res, 200, { ok: true, deleted });
+    return;
+  }
+
   if (req.method === 'GET' && pathname === '/') {
     sendJson(res, 200, {
       name: 'Local Code Agent Server',
@@ -657,6 +735,7 @@ async function route(req, res, pathname) {
         'POST /approve   { id, allowed, scope? }   scope: once|session|always',
         'POST /browser/result { id, result | error }',
         'POST /stop      { sessionId }',
+        'DELETE /session { sessionId }',
       ],
     });
     return;
@@ -665,8 +744,34 @@ async function route(req, res, pathname) {
   sendJson(res, 404, { ok: false, error: 'Not found.' });
 }
 
+// The server is meant for the local machine only. When it is bound to a
+// loopback address the Host header must be a loopback name too, which stops
+// DNS-rebinding tricks (a browser resolving an attacker name to 127.0.0.1).
+const LOOPBACK_BIND = /^(127\.0\.0\.1|localhost|\[::1\])$/i.test(HOST);
+
 const server = http.createServer(async (req, res) => {
-  const { pathname } = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const origin = req.headers.origin;
+  res.corsHeaders = corsHeadersFor(origin);
+
+  // Only the extension and origin-less clients (CLI, desktop app) may talk
+  // to this server — a web page must not be able to drive the local agent.
+  if (!isOriginAllowed(origin)) {
+    sendJson(res, 403, { ok: false, error: 'Origin not allowed.' });
+    return;
+  }
+  if (LOOPBACK_BIND && !isLoopbackHost(req.headers.host)) {
+    sendJson(res, 403, { ok: false, error: 'Host not allowed.' });
+    return;
+  }
+
+  let pathname;
+  try {
+    pathname = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
+  } catch {
+    sendJson(res, 400, { ok: false, error: 'Bad request URL.' });
+    return;
+  }
+
   try {
     await route(req, res, pathname);
   } catch (e) {
@@ -688,5 +793,10 @@ server.listen(PORT, HOST, () => {
   console.log(`  Default model   ${DEFAULT_MODEL}`);
   console.log(`  Available providers: ${getProviderNames().join(', ')}`);
   console.log(`  Project root    ${getProjectRoot() || '(not set — use POST /project)'}`);
+  if (!LOOPBACK_BIND) {
+    console.log('');
+    console.log('  ⚠ HOST is not a loopback address — the agent is reachable from the');
+    console.log('    network. Web pages are still blocked, but keep this on a trusted LAN.');
+  }
   console.log('');
 });
